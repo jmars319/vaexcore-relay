@@ -98,3 +98,52 @@ export type RelayReadiness = {
   mode: "relay-chatbot";
   checks: Array<{ key: string; ok: boolean; detail: string }>;
 };
+
+export type DiscordSuggestionStatus =
+  | "new"
+  | "reviewed"
+  | "accepted"
+  | "rejected"
+  | "archived";
+
+export type DiscordInteractionRow = {
+  id: string;
+  installation_id: string;
+  discord_interaction_id: string;
+  command_name: string;
+  payload_json: string;
+  status: "queued" | "delivered" | "processed" | "failed" | "denied";
+  created_at: string;
+  delivered_at: string | null;
+  processed_at: string | null;
+};
+
+export type DiscordSuggestionRow = {
+  id: string;
+  installation_id: string;
+  discord_interaction_id: string;
+  user_id: string;
+  username: string;
+  suggestion_text: string;
+  status: DiscordSuggestionStatus;
+  created_at: string;
+  updated_at: string;
+};
+
+export type DiscordCommandRegistrationRow = {
+  id: string;
+  installation_id: string;
+  application_id: string;
+  guild_id: string | null;
+  commands_json: string;
+  status: "registered" | "failed";
+  response_json: string;
+  created_at: string;
+};
+
+export type DiscordReadiness = {
+  ready: boolean;
+  mode: "relay-discord-interactions";
+  interactionUrl: string;
+  checks: Array<{ key: string; ok: boolean; detail: string }>;
+};

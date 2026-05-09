@@ -73,6 +73,19 @@ export const hmacSha256Hex = async (secret: string, message: string) => {
     .join("");
 };
 
+export const bytesToHex = (bytes: Uint8Array) =>
+  [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+
+export const hexToBytes = (value: string) => {
+  const trimmed = value.trim();
+  if (!/^(?:[a-f0-9]{2})+$/i.test(trimmed)) {
+    throw new Error("Hex value is malformed.");
+  }
+  return Uint8Array.from(trimmed.match(/.{2}/g) ?? [], (byte) =>
+    Number.parseInt(byte, 16),
+  );
+};
+
 const importAesKey = async (base64Key: string) => {
   const raw = base64Decode(base64Key);
   if (raw.byteLength !== 32) {
