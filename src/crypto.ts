@@ -106,6 +106,15 @@ export const base64UrlEncode = (bytes: Uint8Array) =>
 export const base64UrlDecode = (value: string) =>
   base64Decode(value.replaceAll("-", "+").replaceAll("_", "/"));
 
+export const isValidEncryptionKey = (base64Key: string | undefined) => {
+  if (!base64Key) return false;
+  try {
+    return base64Decode(base64Key).byteLength === 32;
+  } catch {
+    return false;
+  }
+};
+
 const base64Decode = (value: string) => {
   const padded = value.padEnd(Math.ceil(value.length / 4) * 4, "=");
   const raw = atob(padded);

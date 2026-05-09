@@ -3,6 +3,7 @@ import test from "node:test";
 import { bytesToHex } from "../src/crypto";
 import {
   discordApplicationCommands,
+  discordInteractionMatchesConfiguredGuild,
   discordOptionRecord,
   hasDiscordOperatorPermission,
   registerDiscordApplicationCommands,
@@ -107,4 +108,20 @@ test("discord option and operator helpers keep public commands guarded", () => {
     hasDiscordOperatorPermission({ member: { permissions: "0" } }),
     false,
   );
+  assert.equal(
+    discordInteractionMatchesConfiguredGuild(
+      { guild_id: "guild-1" },
+      "guild-1",
+    ),
+    true,
+  );
+  assert.equal(
+    discordInteractionMatchesConfiguredGuild(
+      { guild_id: "guild-2" },
+      "guild-1",
+    ),
+    false,
+  );
+  assert.equal(discordInteractionMatchesConfiguredGuild({}, "guild-1"), false);
+  assert.equal(discordInteractionMatchesConfiguredGuild({}, undefined), true);
 });

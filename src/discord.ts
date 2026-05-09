@@ -284,6 +284,11 @@ export const hasDiscordOperatorPermission = (
   );
 };
 
+export const discordInteractionMatchesConfiguredGuild = (
+  interaction: DiscordInteraction,
+  configuredGuildId?: string,
+) => !configuredGuildId || interaction.guild_id === configuredGuildId;
+
 export const discordEphemeralResponse = (content: string) => ({
   type: discordInteractionResponseType.channelMessageWithSource,
   data: {

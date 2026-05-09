@@ -1,9 +1,15 @@
-import { constantTimeEqual, randomToken, sha256Base64Url } from "./crypto";
+import {
+  constantTimeEqual,
+  isValidEncryptionKey,
+  randomToken,
+  sha256Base64Url,
+} from "./crypto";
 import {
   type DiscordInteraction,
   discordApplicationCommands,
   discordCommandKind,
   discordEphemeralResponse,
+  discordInteractionMatchesConfiguredGuild,
   discordInteractionResponseType,
   discordInteractionType,
   discordInteractionUser,
@@ -656,6 +662,15 @@ const handleDiscordInteractionWebhook = async (
       discordEphemeralResponse("Unsupported Discord interaction type."),
     );
   }
+  if (
+    !discordInteractionMatchesConfiguredGuild(interaction, env.DISCORD_GUILD_ID)
+  ) {
+    return json(
+      discordEphemeralResponse(
+        "VaexCore Relay is not configured for this Discord server.",
+      ),
+    );
+  }
 
   const installation = await resolveDiscordInstallation(env, url, interaction);
   if (!installation) {
@@ -1040,6 +1055,43 @@ const getReadiness = async (
     ? (JSON.parse(broadcasterGrant.scopes_json) as string[])
     : [];
   const checks = [
+    {
+      key: "twitch-client-id",
+      ok: Boolean(env.TWITCH_CLIENT_ID),
+      detail: env.TWITCH_CLIENT_ID
+        ? "Twitch client ID is configured."
+        : "Set TWITCH_CLIENT_ID with wrangler secret put.",
+    },
+    {
+      key: "twitch-client-secret",
+      ok: Boolean(env.TWITCH_CLIENT_SECRET),
+      detail: env.TWITCH_CLIENT_SECRET
+        ? "Twitch client secret is configured."
+        : "Set TWITCH_CLIENT_SECRET with wrangler secret put.",
+    },
+    {
+      key: "eventsub-secret",
+      ok: Boolean(env.TWITCH_EVENTSUB_SECRET),
+      detail: env.TWITCH_EVENTSUB_SECRET
+        ? "Twitch EventSub secret is configured."
+        : "Set TWITCH_EVENTSUB_SECRET with wrangler secret put.",
+    },
+    {
+      key: "token-encryption-key",
+      ok: isValidEncryptionKey(env.TOKEN_ENCRYPTION_KEY),
+      detail: isValidEncryptionKey(env.TOKEN_ENCRYPTION_KEY)
+        ? "Token encryption key is configured with 32 bytes of key material."
+        : "Set TOKEN_ENCRYPTION_KEY to a base64-encoded 32-byte key.",
+    },
+    {
+      key: "public-base-url",
+      ok:
+        env.PUBLIC_BASE_URL?.startsWith("https://") ||
+        env.PUBLIC_BASE_URL?.includes("127.0.0.1"),
+      detail: env.PUBLIC_BASE_URL?.startsWith("https://")
+        ? "Relay public base URL is HTTPS."
+        : "Set PUBLIC_BASE_URL to the deployed HTTPS Worker URL before live validation.",
+    },
     {
       key: "installation",
       ok: Boolean(installation),

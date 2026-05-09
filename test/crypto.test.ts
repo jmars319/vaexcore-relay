@@ -5,6 +5,7 @@ import {
   decryptText,
   encryptText,
   hmacSha256Hex,
+  isValidEncryptionKey,
   randomToken,
   sha256Base64Url,
 } from "../src/crypto";
@@ -22,6 +23,9 @@ test("hash and random helpers produce stable safe values", async () => {
   assert.notEqual(randomToken(), randomToken());
   assert.equal(constantTimeEqual("same", "same"), true);
   assert.equal(constantTimeEqual("same", "different"), false);
+  assert.equal(isValidEncryptionKey(key), true);
+  assert.equal(isValidEncryptionKey(btoa("short")), false);
+  assert.equal(isValidEncryptionKey("not base64!"), false);
 });
 
 test("hmacSha256Hex signs known message", async () => {
