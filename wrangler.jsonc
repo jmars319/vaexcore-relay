@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "vaexcore-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-09",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+  },
+  "vars": {
+    "PUBLIC_BASE_URL": "http://127.0.0.1:8787",
+    "TWITCH_REDIRECT_URI": "http://127.0.0.1:8787/oauth/twitch/callback",
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "vaexcore-relay",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations",
+    },
+  ],
+}
