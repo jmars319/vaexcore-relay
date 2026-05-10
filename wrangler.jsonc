@@ -1,22 +1,30 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "vaexcore-relay",
+  "account_id": "a82e124f6e8ad4124b0d0d82eaf25bd1",
   "main": "src/index.ts",
   "compatibility_date": "2026-05-09",
   "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "routes": [
+    {
+      "pattern": "relay.vaexil.tv",
+      "custom_domain": true,
+    },
+  ],
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1,
   },
   "vars": {
-    "PUBLIC_BASE_URL": "http://127.0.0.1:8787",
-    "TWITCH_REDIRECT_URI": "http://127.0.0.1:8787/oauth/twitch/callback",
+    "PUBLIC_BASE_URL": "https://relay.vaexil.tv",
+    "TWITCH_REDIRECT_URI": "https://relay.vaexil.tv/oauth/twitch/callback",
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "vaexcore-relay",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "97e98f56-9b01-44d7-99bc-85467366129e",
       "migrations_dir": "migrations",
     },
   ],
