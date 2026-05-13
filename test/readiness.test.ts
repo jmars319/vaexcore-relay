@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import relayWorker, { outboundSendPersistence } from "../src/index";
+import relayWorker, {
+  outboundRetryPersistence,
+  outboundSendPersistence,
+  processOutboundRetryQueue,
+} from "../src/index";
 import { sha256Base64Url } from "../src/crypto";
 
 test("outboundSendPersistence records retry and dead-letter metadata", () => {
@@ -59,6 +63,93 @@ test("outboundSendPersistence records retry and dead-letter metadata", () => {
   );
 });
 
+test("outboundRetryPersistence retries until max attempts then dead-letters", () => {
+  assert.deepEqual(
+    outboundRetryPersistence({
+      sent: false,
+      retryAfterMs: 30_000,
+      fallbackReason: "rate limited",
+      now: "2026-05-13T12:00:00.000Z",
+      currentRetryCount: 1,
+      maxRetryCount: 3,
+    }),
+    {
+      status: "retry",
+      reason: "rate limited",
+      retryAfterMs: 30_000,
+      retryCount: 2,
+      nextRetryAt: "2026-05-13T12:00:30.000Z",
+      deadLetteredAt: null,
+      finalDropReason: null,
+      updatedAt: "2026-05-13T12:00:00.000Z",
+    },
+  );
+
+  assert.deepEqual(
+    outboundRetryPersistence({
+      sent: false,
+      retryAfterMs: 30_000,
+      fallbackReason: "still rate limited",
+      now: "2026-05-13T12:01:00.000Z",
+      currentRetryCount: 2,
+      maxRetryCount: 3,
+    }),
+    {
+      status: "failed",
+      reason: "still rate limited",
+      retryAfterMs: 30_000,
+      retryCount: 3,
+      nextRetryAt: null,
+      deadLetteredAt: "2026-05-13T12:01:00.000Z",
+      finalDropReason: "still rate limited",
+      updatedAt: "2026-05-13T12:01:00.000Z",
+    },
+  );
+});
+
+test("processOutboundRetryQueue sends due retry rows", async () => {
+  const db = retryDb();
+  const env = {
+    TWITCH_CLIENT_ID: "client-id",
+    TWITCH_CLIENT_SECRET: "client-secret",
+    DB: db,
+  } as any;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/oauth2/token")) {
+      return Response.json({
+        access_token: "app-token",
+        expires_in: 3600,
+        token_type: "bearer",
+      });
+    }
+    if (url.includes("/chat/messages")) {
+      return Response.json({
+        data: [{ message_id: "retry-message-1", is_sent: true }],
+      });
+    }
+    return Response.json({ ok: false }, { status: 404 });
+  }) as typeof fetch;
+
+  try {
+    const summary = await processOutboundRetryQueue(env, {
+      now: "2026-05-13T12:00:00.000Z",
+    });
+    assert.equal(summary.ok, true);
+    assert.equal(summary.sent, 1);
+    const update = db.updates[0];
+    const audit = db.audits[0];
+    assert(update, "retry worker should update the send row");
+    assert(audit, "retry worker should write an audit event");
+    assert.equal(update.status, "sent");
+    assert.equal(update.twitchMessageId, "retry-message-1");
+    assert.equal(audit.action, "chat.retry.sent");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("console readiness report is redacted and includes queue counts", async () => {
   const consoleToken = "console-token";
   const env = fakeEnv(await sha256Base64Url(consoleToken));
@@ -88,6 +179,33 @@ test("console readiness report is redacted and includes queue counts", async () 
   assert.equal(JSON.stringify(body).includes("actual-secret-value"), false);
 });
 
+test("admin diagnostics are protected and redacted", async () => {
+  const consoleToken = "console-token";
+  const env = fakeEnv(await sha256Base64Url(consoleToken));
+  const unauthorized = await relayWorker.fetch(
+    new Request("https://relay.example/admin/diagnostics"),
+    env,
+    fakeExecutionContext(),
+  );
+  assert.equal(unauthorized.status, 401);
+
+  const response = await relayWorker.fetch(
+    new Request("https://relay.example/admin/diagnostics", {
+      headers: { authorization: "Bearer admin-token" },
+    }),
+    env,
+    fakeExecutionContext(),
+  );
+  const body = (await response.json()) as Record<string, any>;
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.configuration.hasDiscordBotToken, true);
+  assert.equal(body.queues.outboundChatSends.deadLettered, 1);
+  assert.equal(body.eventSub.staleCount, 0);
+  assert.equal(JSON.stringify(body).includes("actual-secret-value"), false);
+  assert.equal(JSON.stringify(body).includes("discord-token"), false);
+});
+
 const fakeEnv = (consoleTokenHash: string) =>
   ({
     PUBLIC_BASE_URL: "https://relay.example",
@@ -110,6 +228,82 @@ const fakeExecutionContext = () =>
     waitUntil() {},
     passThroughOnException() {},
   }) as any;
+
+const retryDb = () => {
+  const state = {
+    row: {
+      id: "send-retry-1",
+      installation_id: "installation-1",
+      broadcaster_user_id: "broadcaster-1",
+      sender_user_id: "bot-1",
+      message: "retry me",
+      status: "retry",
+      twitch_message_id: null,
+      failure_category: "twitch_rejected",
+      reason: "rate limited",
+      retry_after_ms: 30_000,
+      idempotency_key: "message-1",
+      retry_count: 1,
+      next_retry_at: "2026-05-13T11:59:00.000Z",
+      dead_lettered_at: null,
+      final_drop_reason: null,
+      created_at: "2026-05-13T11:58:00.000Z",
+      updated_at: "2026-05-13T11:58:00.000Z",
+    },
+    updates: [] as Array<{
+      status: string;
+      twitchMessageId: string | null;
+      retryCount: number;
+    }>,
+    audits: [] as Array<{ action: string; target: string | null }>,
+  };
+  return {
+    get updates() {
+      return state.updates;
+    },
+    get audits() {
+      return state.audits;
+    },
+    prepare(sql: string) {
+      const statement = {
+        bindings: [] as unknown[],
+        bind(...values: unknown[]) {
+          this.bindings = values;
+          return this;
+        },
+        async all<T>() {
+          if (sql.includes("FROM outbound_chat_sends")) {
+            return { results: [state.row] as T[] };
+          }
+          return { results: [] as T[] };
+        },
+        async first<T>() {
+          return null as T | null;
+        },
+        async run() {
+          if (sql.includes("UPDATE outbound_chat_sends")) {
+            state.updates.push({
+              status: String(this.bindings[0]),
+              twitchMessageId: this.bindings[1] as string | null,
+              retryCount: Number(this.bindings[5]),
+            });
+          }
+          if (sql.includes("INSERT INTO audit_events")) {
+            state.audits.push({
+              action: String(this.bindings[2]),
+              target: this.bindings[3] as string | null,
+            });
+          }
+          return { meta: { changes: 1 } };
+        },
+      };
+      return statement;
+    },
+    async batch() {
+      return [];
+    },
+  };
+};
 
 const fakeDb = (consoleTokenHash: string) => ({
   prepare(sql: string) {

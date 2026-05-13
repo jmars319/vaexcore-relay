@@ -54,6 +54,9 @@ import {
 const serviceName = "vaexcore relay";
 const serviceVersion = "0.1.0";
 const maxJsonBytes = 64 * 1024;
+const maxOutboundRetryAttempts = 3;
+const outboundRetryBatchLimit = 25;
+const defaultRetryBackoffMs = 60_000;
 
 type RelayEnv = Env & {
   TWITCH_CLIENT_ID: string;
@@ -91,22 +94,13 @@ export default {
           ],
         });
       }
-      if (request.method === "GET" && url.pathname === "/diagnostics") {
+      if (
+        request.method === "GET" &&
+        (url.pathname === "/diagnostics" ||
+          url.pathname === "/admin/diagnostics")
+      ) {
         await requireAdmin(request, env);
-        return json({
-          ok: true,
-          service: serviceName,
-          version: serviceVersion,
-          publicBaseUrl: env.PUBLIC_BASE_URL,
-          hasTwitchClientId: Boolean(env.TWITCH_CLIENT_ID),
-          hasEventSubSecret: Boolean(env.TWITCH_EVENTSUB_SECRET),
-          hasEncryptionKey: Boolean(env.TOKEN_ENCRYPTION_KEY),
-          hasDiscordBotToken: Boolean(env.DISCORD_BOT_TOKEN),
-          hasDiscordPublicKey: Boolean(env.DISCORD_PUBLIC_KEY),
-          hasDiscordApplicationId: Boolean(env.DISCORD_APPLICATION_ID),
-          hasDiscordGuildId: Boolean(env.DISCORD_GUILD_ID),
-          discordInteractionUrl: discordInteractionUrl(env),
-        });
+        return json(await getAdminDiagnostics(env));
       }
       if (request.method === "POST" && url.pathname === "/api/console/pair") {
         await requireAdmin(request, env);
@@ -232,6 +226,13 @@ export default {
         { status: error instanceof HttpError ? error.status : 500 },
       );
     }
+  },
+  async scheduled(
+    _controller: ScheduledController,
+    env: RelayEnv,
+    ctx: ExecutionContext,
+  ): Promise<void> {
+    ctx.waitUntil(processOutboundRetryQueue(env));
   },
 };
 
@@ -666,6 +667,184 @@ const sendChat = async (
     transport: "relay-chatbot",
     idempotentReplay: false,
   });
+};
+
+export const processOutboundRetryQueue = async (
+  env: RelayEnv,
+  options: { now?: string; limit?: number } = {},
+) => {
+  const now = options.now ?? new Date().toISOString();
+  const limit = Math.min(
+    Math.max(1, Math.floor(options.limit ?? outboundRetryBatchLimit)),
+    100,
+  );
+  const rows = await env.DB.prepare(
+    `
+      SELECT *
+      FROM outbound_chat_sends
+      WHERE status = 'retry'
+        AND dead_lettered_at IS NULL
+        AND (next_retry_at IS NULL OR next_retry_at <= ?)
+      ORDER BY COALESCE(next_retry_at, created_at) ASC
+      LIMIT ?
+    `,
+  )
+    .bind(now, limit)
+    .all<OutboundChatSendRow>();
+  const summary = {
+    ok: true,
+    processed: rows.results.length,
+    sent: 0,
+    retry: 0,
+    failed: 0,
+    errors: 0,
+    maxAttempts: maxOutboundRetryAttempts,
+  };
+  if (rows.results.length === 0) {
+    return summary;
+  }
+
+  let appAccessToken = "";
+  try {
+    const appToken = await getAppAccessToken({
+      clientId: env.TWITCH_CLIENT_ID,
+      clientSecret: env.TWITCH_CLIENT_SECRET,
+    });
+    appAccessToken = appToken.access_token;
+  } catch (error) {
+    await writeAudit(env, null, "chat.retry.worker", "app-token", {
+      ok: false,
+      error: error instanceof Error ? error.message : "App token unavailable.",
+    });
+    return { ...summary, ok: false, errors: rows.results.length };
+  }
+
+  for (const row of rows.results) {
+    try {
+      const result = await retryOutboundChatSend(env, row, appAccessToken, now);
+      summary[result.status] += 1;
+    } catch (error) {
+      summary.errors += 1;
+      await markRetryWorkerFailure(env, row, now, error);
+    }
+  }
+
+  return summary;
+};
+
+const retryOutboundChatSend = async (
+  env: RelayEnv,
+  row: OutboundChatSendRow,
+  appAccessToken: string,
+  now: string,
+) => {
+  const result = await sendAppTokenChatMessage({
+    clientId: env.TWITCH_CLIENT_ID,
+    appAccessToken,
+    broadcasterId: row.broadcaster_user_id,
+    senderId: row.sender_user_id,
+    message: row.message,
+  });
+  const data = getFirstDataItem(result.body);
+  const dropReason = data?.drop_reason ? JSON.stringify(data.drop_reason) : "";
+  const sent = result.response.ok && data?.is_sent !== false;
+  const persistence = outboundRetryPersistence({
+    sent,
+    retryAfterMs: retryAfterMs(result.response),
+    fallbackReason: dropReason || `Twitch response ${result.response.status}`,
+    now,
+    currentRetryCount: row.retry_count,
+    maxRetryCount: maxOutboundRetryAttempts,
+  });
+
+  await persistRetryResult(env, row, persistence, stringFrom(data?.message_id));
+  await writeAudit(
+    env,
+    row.installation_id,
+    retryAuditAction(persistence.status),
+    row.id,
+    {
+      ok: persistence.status === "sent",
+      status: result.response.status,
+      retryCount: persistence.retryCount,
+      nextRetryAt: persistence.nextRetryAt,
+      finalDropReason: persistence.finalDropReason,
+    },
+  );
+  return persistence;
+};
+
+const markRetryWorkerFailure = async (
+  env: RelayEnv,
+  row: OutboundChatSendRow,
+  now: string,
+  error: unknown,
+) => {
+  const persistence = outboundRetryPersistence({
+    sent: false,
+    retryAfterMs: defaultRetryBackoffMs,
+    fallbackReason:
+      error instanceof Error ? error.message : "Retry worker send failed.",
+    now,
+    currentRetryCount: row.retry_count,
+    maxRetryCount: maxOutboundRetryAttempts,
+  });
+  await persistRetryResult(env, row, persistence, null);
+  await writeAudit(
+    env,
+    row.installation_id,
+    retryAuditAction(persistence.status),
+    row.id,
+    {
+      ok: false,
+      retryCount: persistence.retryCount,
+      nextRetryAt: persistence.nextRetryAt,
+      finalDropReason: persistence.finalDropReason,
+    },
+  );
+};
+
+const persistRetryResult = async (
+  env: RelayEnv,
+  row: OutboundChatSendRow,
+  persistence: ReturnType<typeof outboundRetryPersistence>,
+  twitchMessageId: string | null,
+) =>
+  env.DB.prepare(
+    `
+      UPDATE outbound_chat_sends
+      SET status = ?,
+        twitch_message_id = ?,
+        failure_category = ?,
+        reason = ?,
+        retry_after_ms = ?,
+        retry_count = ?,
+        next_retry_at = ?,
+        dead_lettered_at = ?,
+        final_drop_reason = ?,
+        updated_at = ?
+      WHERE id = ? AND status = 'retry'
+    `,
+  )
+    .bind(
+      persistence.status,
+      twitchMessageId,
+      persistence.status === "sent" ? null : "twitch_retry",
+      persistence.reason,
+      persistence.retryAfterMs,
+      persistence.retryCount,
+      persistence.nextRetryAt,
+      persistence.deadLetteredAt,
+      persistence.finalDropReason,
+      persistence.updatedAt,
+      row.id,
+    )
+    .run();
+
+const retryAuditAction = (status: "sent" | "retry" | "failed") => {
+  if (status === "sent") return "chat.retry.sent";
+  if (status === "retry") return "chat.retry.scheduled";
+  return "chat.retry.dead_letter";
 };
 
 const handleDiscordInteractionWebhook = async (
@@ -1506,6 +1685,155 @@ const countRows = async (
   return row?.count ?? 0;
 };
 
+const getAdminDiagnostics = async (env: RelayEnv) => {
+  const [tables, queues, eventSub, discord, audit] = await Promise.all([
+    getTableReadiness(env),
+    getAdminQueueDiagnostics(env),
+    getEventSubDiagnostics(env),
+    getDiscordAdminDiagnostics(env),
+    getAuditDiagnostics(env),
+  ]);
+
+  return {
+    ok: true,
+    service: serviceName,
+    version: serviceVersion,
+    generatedAt: new Date().toISOString(),
+    publicBaseUrl: env.PUBLIC_BASE_URL,
+    configuration: {
+      hasTwitchClientId: Boolean(env.TWITCH_CLIENT_ID),
+      hasEventSubSecret: Boolean(env.TWITCH_EVENTSUB_SECRET),
+      hasEncryptionKey: Boolean(env.TOKEN_ENCRYPTION_KEY),
+      hasDiscordBotToken: Boolean(env.DISCORD_BOT_TOKEN),
+      hasDiscordPublicKey: Boolean(env.DISCORD_PUBLIC_KEY),
+      hasDiscordApplicationId: Boolean(env.DISCORD_APPLICATION_ID),
+      hasDiscordGuildId: Boolean(env.DISCORD_GUILD_ID),
+      discordInteractionUrl: discordInteractionUrl(env),
+    },
+    tables,
+    queues,
+    eventSub,
+    discord,
+    audit,
+  };
+};
+
+const getAdminQueueDiagnostics = async (env: RelayEnv) => {
+  const now = new Date().toISOString();
+  const [outboundRows, chatEvents, discordInteractions] = await Promise.all([
+    env.DB.prepare(
+      `
+        SELECT status, COUNT(*) AS count,
+          SUM(CASE WHEN dead_lettered_at IS NULL THEN 0 ELSE 1 END) AS dead_lettered,
+          SUM(CASE WHEN status = 'retry' AND (next_retry_at IS NULL OR next_retry_at <= ?) THEN 1 ELSE 0 END) AS due_retry
+        FROM outbound_chat_sends
+        GROUP BY status
+      `,
+    )
+      .bind(now)
+      .all<{
+        status: OutboundChatSendRow["status"];
+        count: number;
+        dead_lettered: number | null;
+        due_retry: number | null;
+      }>(),
+    env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM chat_events WHERE delivered_at IS NULL",
+    ).first<{ count: number }>(),
+    env.DB.prepare(
+      `
+        SELECT status, COUNT(*) AS count
+        FROM discord_interactions
+        GROUP BY status
+      `,
+    ).all<{ status: DiscordInteractionRow["status"]; count: number }>(),
+  ]);
+  const outbound = {
+    queued: 0,
+    sent: 0,
+    retry: 0,
+    failed: 0,
+    dueRetry: 0,
+    deadLettered: 0,
+  };
+  for (const row of outboundRows.results) {
+    outbound[row.status] = row.count;
+    outbound.deadLettered += row.dead_lettered ?? 0;
+    outbound.dueRetry += row.due_retry ?? 0;
+  }
+  return {
+    generatedAt: now,
+    outboundChatSends: outbound,
+    queuedTwitchChatEvents: chatEvents?.count ?? 0,
+    discordInteractions: Object.fromEntries(
+      discordInteractions.results.map((row) => [row.status, row.count]),
+    ),
+  };
+};
+
+const getEventSubDiagnostics = async (env: RelayEnv) => {
+  const staleCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const [statusRows, stale] = await Promise.all([
+    env.DB.prepare(
+      `
+        SELECT status, COUNT(*) AS count
+        FROM eventsub_subscriptions
+        GROUP BY status
+      `,
+    ).all<{ status: string; count: number }>(),
+    env.DB.prepare(
+      `
+        SELECT COUNT(*) AS count
+        FROM eventsub_subscriptions
+        WHERE updated_at < ?
+      `,
+    )
+      .bind(staleCutoff)
+      .first<{ count: number }>(),
+  ]);
+  return {
+    staleCutoff,
+    staleCount: stale?.count ?? 0,
+    byStatus: Object.fromEntries(
+      statusRows.results.map((row) => [row.status, row.count]),
+    ),
+  };
+};
+
+const getDiscordAdminDiagnostics = async (env: RelayEnv) => {
+  const [configs, registrations] = await Promise.all([
+    env.DB.prepare("SELECT COUNT(*) AS count FROM discord_configs").first<{
+      count: number;
+    }>(),
+    env.DB.prepare(
+      `
+        SELECT installation_id, application_id, guild_id, status, response_json, created_at
+        FROM discord_command_registrations
+        ORDER BY created_at DESC
+        LIMIT 10
+      `,
+    ).all<Record<string, unknown>>(),
+  ]);
+  return {
+    configuredInstallations: configs?.count ?? 0,
+    latestRegistrations: registrations.results.map((row) => redact(row)),
+  };
+};
+
+const getAuditDiagnostics = async (env: RelayEnv) => {
+  const rows = await env.DB.prepare(
+    `
+      SELECT installation_id, action, target, metadata_json, created_at
+      FROM audit_events
+      ORDER BY created_at DESC
+      LIMIT 25
+    `,
+  ).all<Record<string, unknown>>();
+  return {
+    recent: rows.results.map((row) => redact(row)),
+  };
+};
+
 const requireRelayReadyGrants = async (
   env: RelayEnv,
   installationId: string,
@@ -1871,6 +2199,36 @@ export const outboundSendPersistence = (input: {
     nextRetryAt,
     deadLetteredAt,
     finalDropReason: deadLetteredAt ? input.fallbackReason : null,
+  } as const;
+};
+
+export const outboundRetryPersistence = (input: {
+  sent: boolean;
+  retryAfterMs: number | null;
+  fallbackReason: string;
+  now: string;
+  currentRetryCount: number;
+  maxRetryCount: number;
+}) => {
+  const retryCount = input.currentRetryCount + 1;
+  const canRetry =
+    !input.sent &&
+    input.retryAfterMs !== null &&
+    retryCount < input.maxRetryCount;
+  const status = input.sent ? "sent" : canRetry ? "retry" : "failed";
+  const nextRetryAt = canRetry
+    ? new Date(Date.parse(input.now) + input.retryAfterMs!).toISOString()
+    : null;
+  const deadLetteredAt = status === "failed" ? input.now : null;
+  return {
+    status,
+    reason: input.sent ? null : input.fallbackReason,
+    retryAfterMs: input.sent ? null : input.retryAfterMs,
+    retryCount,
+    nextRetryAt,
+    deadLetteredAt,
+    finalDropReason: deadLetteredAt ? input.fallbackReason : null,
+    updatedAt: input.now,
   } as const;
 };
 
