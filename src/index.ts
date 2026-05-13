@@ -43,6 +43,8 @@ import {
   type InstallationRow,
   type OAuthGrantKind,
   type OAuthGrantRow,
+  type OutboundChatSendRow,
+  type RelayBotReadinessReport,
   type RelayReadiness,
   type TwitchEventSubEnvelope,
   requiredBotScopes,
@@ -117,6 +119,13 @@ export default {
           installation: safeInstallation(installation),
           readiness: await getReadiness(env, installation.id),
         });
+      }
+      if (
+        request.method === "GET" &&
+        url.pathname === "/api/console/readiness-report"
+      ) {
+        const installation = await requireConsole(request, env, url);
+        return json(await getBotReadinessReport(env, installation));
       }
       if (
         request.method === "GET" &&
@@ -554,6 +563,31 @@ const sendChat = async (
 ) => {
   const input = objectInput(body);
   const message = stringInput(input.message, "Chat message", 500);
+  const idempotencyKey = optionalBoundedString(
+    input.idempotencyKey ?? input.idempotency_key,
+    "Idempotency key",
+    120,
+  );
+  if (idempotencyKey) {
+    const existing = await getOutboundSendByIdempotencyKey(
+      env,
+      installationId,
+      idempotencyKey,
+    );
+    if (existing) {
+      return json({
+        ok: existing.status === "sent",
+        messageId: existing.twitch_message_id ?? "",
+        transport: "relay-chatbot",
+        idempotentReplay: true,
+        status: existing.status,
+        failureCategory: existing.failure_category ?? undefined,
+        reason: existing.final_drop_reason ?? existing.reason ?? undefined,
+        retryAfterMs: existing.retry_after_ms ?? undefined,
+        nextRetryAt: existing.next_retry_at ?? undefined,
+      });
+    }
+  }
   const { botGrant, broadcasterGrant } = await requireRelayReadyGrants(
     env,
     installationId,
@@ -574,13 +608,20 @@ const sendChat = async (
   const dropReason = data?.drop_reason ? JSON.stringify(data.drop_reason) : "";
   const sent = result.response.ok && data?.is_sent !== false;
   const now = new Date().toISOString();
+  const persistence = outboundSendPersistence({
+    sent,
+    retryAfterMs: retryAfterMs(result.response),
+    fallbackReason: dropReason || `Twitch response ${result.response.status}`,
+    now,
+  });
   await env.DB.prepare(
     `
       INSERT INTO outbound_chat_sends (
         id, installation_id, broadcaster_user_id, sender_user_id, message,
         status, twitch_message_id, failure_category, reason, retry_after_ms,
-        created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        idempotency_key, retry_count, next_retry_at, dead_lettered_at,
+        final_drop_reason, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
   )
     .bind(
@@ -589,11 +630,16 @@ const sendChat = async (
       broadcasterGrant.user_id,
       botGrant.user_id,
       message,
-      sent ? "sent" : "failed",
+      persistence.status,
       stringFrom(data?.message_id),
       sent ? null : "twitch_rejected",
-      sent ? null : dropReason || `Twitch response ${result.response.status}`,
-      retryAfterMs(result.response),
+      sent ? null : persistence.reason,
+      persistence.retryAfterMs,
+      idempotencyKey,
+      persistence.retryCount,
+      persistence.nextRetryAt,
+      persistence.deadLetteredAt,
+      persistence.finalDropReason,
       now,
       now,
     )
@@ -618,6 +664,7 @@ const sendChat = async (
     ok: true,
     messageId: stringFrom(data?.message_id),
     transport: "relay-chatbot",
+    idempotentReplay: false,
   });
 };
 
@@ -1207,6 +1254,258 @@ const getDiscordReadiness = async (
   };
 };
 
+const getBotReadinessReport = async (
+  env: RelayEnv,
+  installation: InstallationRow,
+): Promise<RelayBotReadinessReport> => {
+  const [twitch, discord, tables, counts, latest] = await Promise.all([
+    getReadiness(env, installation.id),
+    getDiscordReadiness(env, installation.id),
+    getTableReadiness(env),
+    getReadinessCounts(env, installation.id),
+    getLatestReadinessRecords(env, installation.id),
+  ]);
+  const publicBaseUrl = env.PUBLIC_BASE_URL ?? "";
+  const checks: RelayBotReadinessReport["checks"] = [
+    ...tables.map((table): RelayBotReadinessReport["checks"][number] => ({
+      key: `d1-table-${table.name}`,
+      ok: table.exists,
+      state: table.exists ? "ready" : "blocked",
+      detail: table.exists
+        ? `${table.name} table exists.`
+        : `${table.name} table is missing; apply D1 migrations.`,
+    })),
+    ...twitch.checks.map(
+      (check): RelayBotReadinessReport["checks"][number] => ({
+        ...check,
+        state: check.ok ? "ready" : "todo",
+      }),
+    ),
+    ...discord.checks.map(
+      (check): RelayBotReadinessReport["checks"][number] => ({
+        ...check,
+        state: check.ok ? "ready" : "todo",
+      }),
+    ),
+    {
+      key: "latest-eventsub-registration",
+      ok: Boolean(latest.eventSubRegistration),
+      state: latest.eventSubRegistration ? "ready" : "todo",
+      detail: latest.eventSubRegistration
+        ? `Latest EventSub registration status is ${latest.eventSubRegistration.status}.`
+        : "Register EventSub from Console after Twitch OAuth grants are ready.",
+    },
+    {
+      key: "latest-outbound-send",
+      ok: latest.outboundSend?.status === "sent",
+      state:
+        latest.outboundSend?.status === "sent"
+          ? "ready"
+          : latest.outboundSend
+            ? "degraded"
+            : "todo",
+      detail: latest.outboundSend
+        ? `Latest outbound send status is ${latest.outboundSend.status}.`
+        : "Send a Relay test message from Console after grants are ready.",
+    },
+  ];
+
+  return {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    installation: {
+      id: installation.id,
+      name: installation.name,
+      botLogin: installation.bot_login ?? "",
+      broadcasterLogin: installation.broadcaster_login ?? "",
+    },
+    urls: {
+      publicBaseUrl,
+      twitchCallbackUrl: publicBaseUrl
+        ? `${publicBaseUrl}/oauth/twitch/callback`
+        : "",
+      twitchEventSubWebhookUrl: publicBaseUrl
+        ? `${publicBaseUrl}/webhooks/twitch/eventsub`
+        : "",
+      discordInteractionUrl: discordInteractionUrl(env),
+    },
+    checks,
+    counts,
+    latest,
+  };
+};
+
+const requiredTables = [
+  "installations",
+  "oauth_states",
+  "oauth_grants",
+  "eventsub_subscriptions",
+  "chat_events",
+  "outbound_chat_sends",
+  "audit_events",
+  "discord_configs",
+  "discord_interactions",
+  "discord_suggestions",
+  "discord_command_registrations",
+] as const;
+
+const getTableReadiness = async (env: RelayEnv) => {
+  const rows = await env.DB.prepare(
+    `
+      SELECT name
+      FROM sqlite_master
+      WHERE type = 'table'
+    `,
+  ).all<{ name: string }>();
+  const names = new Set(rows.results.map((row) => row.name));
+  return requiredTables.map((name) => ({ name, exists: names.has(name) }));
+};
+
+const getReadinessCounts = async (
+  env: RelayEnv,
+  installationId: string,
+): Promise<RelayBotReadinessReport["counts"]> => {
+  const [
+    queuedTwitchChatEvents,
+    queuedDiscordInteractions,
+    outboundRows,
+    suggestionRows,
+  ] = await Promise.all([
+    countRows(
+      env,
+      "chat_events",
+      "installation_id = ? AND delivered_at IS NULL",
+      installationId,
+    ),
+    countRows(
+      env,
+      "discord_interactions",
+      "installation_id = ? AND status = 'queued' AND delivered_at IS NULL",
+      installationId,
+    ),
+    env.DB.prepare(
+      `
+        SELECT status, COUNT(*) AS count,
+          SUM(CASE WHEN dead_lettered_at IS NULL THEN 0 ELSE 1 END) AS dead_lettered
+        FROM outbound_chat_sends
+        WHERE installation_id = ?
+        GROUP BY status
+      `,
+    )
+      .bind(installationId)
+      .all<{
+        status: OutboundChatSendRow["status"];
+        count: number;
+        dead_lettered: number | null;
+      }>(),
+    env.DB.prepare(
+      `
+        SELECT status, COUNT(*) AS count
+        FROM discord_suggestions
+        WHERE installation_id = ?
+        GROUP BY status
+      `,
+    )
+      .bind(installationId)
+      .all<{ status: DiscordSuggestionStatus; count: number }>(),
+  ]);
+  const outboundSends = {
+    queued: 0,
+    sent: 0,
+    retry: 0,
+    failed: 0,
+    deadLettered: 0,
+  };
+  for (const row of outboundRows.results) {
+    outboundSends[row.status] = row.count;
+    outboundSends.deadLettered += row.dead_lettered ?? 0;
+  }
+  const suggestions: Record<DiscordSuggestionStatus, number> = {
+    new: 0,
+    reviewed: 0,
+    accepted: 0,
+    rejected: 0,
+    archived: 0,
+  };
+  for (const row of suggestionRows.results) {
+    suggestions[row.status] = row.count;
+  }
+  return {
+    queuedTwitchChatEvents,
+    queuedDiscordInteractions,
+    suggestions,
+    outboundSends,
+  };
+};
+
+const getLatestReadinessRecords = async (
+  env: RelayEnv,
+  installationId: string,
+): Promise<RelayBotReadinessReport["latest"]> => {
+  const [eventSubRegistration, discordCommandRegistration, outboundSend] =
+    await Promise.all([
+      env.DB.prepare(
+        `
+          SELECT twitch_subscription_id, type, version, status, condition_json, created_at, updated_at
+          FROM eventsub_subscriptions
+          WHERE installation_id = ?
+          ORDER BY created_at DESC
+          LIMIT 1
+        `,
+      )
+        .bind(installationId)
+        .first<Record<string, unknown>>(),
+      env.DB.prepare(
+        `
+          SELECT application_id, guild_id, status, response_json, created_at
+          FROM discord_command_registrations
+          WHERE installation_id = ?
+          ORDER BY created_at DESC
+          LIMIT 1
+        `,
+      )
+        .bind(installationId)
+        .first<Record<string, unknown>>(),
+      env.DB.prepare(
+        `
+          SELECT status, twitch_message_id, failure_category, reason, retry_after_ms,
+            retry_count, next_retry_at, dead_lettered_at, final_drop_reason, created_at, updated_at
+          FROM outbound_chat_sends
+          WHERE installation_id = ?
+          ORDER BY created_at DESC
+          LIMIT 1
+        `,
+      )
+        .bind(installationId)
+        .first<Record<string, unknown>>(),
+    ]);
+  return {
+    eventSubRegistration: eventSubRegistration
+      ? (redact(eventSubRegistration) as Record<string, unknown>)
+      : null,
+    discordCommandRegistration: discordCommandRegistration
+      ? (redact(discordCommandRegistration) as Record<string, unknown>)
+      : null,
+    outboundSend: outboundSend
+      ? (redact(outboundSend) as Record<string, unknown>)
+      : null,
+  };
+};
+
+const countRows = async (
+  env: RelayEnv,
+  table: string,
+  whereClause: string,
+  installationId: string,
+) => {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS count FROM ${table} WHERE ${whereClause}`,
+  )
+    .bind(installationId)
+    .first<{ count: number }>();
+  return row?.count ?? 0;
+};
+
 const requireRelayReadyGrants = async (
   env: RelayEnv,
   installationId: string,
@@ -1334,6 +1633,23 @@ const getLatestDiscordCommandRegistration = (
     .bind(installationId)
     .first<DiscordCommandRegistrationRow>();
 
+const getOutboundSendByIdempotencyKey = (
+  env: RelayEnv,
+  installationId: string,
+  idempotencyKey: string,
+) =>
+  env.DB.prepare(
+    `
+      SELECT *
+      FROM outbound_chat_sends
+      WHERE installation_id = ? AND idempotency_key = ?
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+  )
+    .bind(installationId, idempotencyKey)
+    .first<OutboundChatSendRow>();
+
 const upsertDiscordConfig = async (env: RelayEnv, installationId: string) => {
   const now = new Date().toISOString();
   await env.DB.prepare(
@@ -1460,6 +1776,15 @@ const stringInput = (value: unknown, field: string, maxLength: number) => {
   return trimmed;
 };
 
+const optionalBoundedString = (
+  value: unknown,
+  field: string,
+  maxLength: number,
+) => {
+  if (value === undefined || value === null || value === "") return null;
+  return stringInput(value, field, maxLength);
+};
+
 const grantKind = (value: unknown): OAuthGrantKind => {
   if (value === "bot" || value === "broadcaster") return value;
   throw new HttpError(400, "OAuth grant kind must be bot or broadcaster.");
@@ -1525,6 +1850,28 @@ const retryAfterMs = (response: Response) => {
   if (!raw) return null;
   const seconds = Number.parseInt(raw, 10);
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : null;
+};
+
+export const outboundSendPersistence = (input: {
+  sent: boolean;
+  retryAfterMs: number | null;
+  fallbackReason: string;
+  now: string;
+}) => {
+  const nextRetryAt = input.retryAfterMs
+    ? new Date(Date.parse(input.now) + input.retryAfterMs).toISOString()
+    : null;
+  const status = input.sent ? "sent" : input.retryAfterMs ? "retry" : "failed";
+  const deadLetteredAt = !input.sent && !input.retryAfterMs ? input.now : null;
+  return {
+    status,
+    reason: input.sent ? null : input.fallbackReason,
+    retryAfterMs: input.retryAfterMs,
+    retryCount: input.sent ? 0 : 1,
+    nextRetryAt,
+    deadLetteredAt,
+    finalDropReason: deadLetteredAt ? input.fallbackReason : null,
+  } as const;
 };
 
 const redact = (value: unknown): unknown => {

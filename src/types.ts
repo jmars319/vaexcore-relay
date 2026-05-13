@@ -147,3 +147,63 @@ export type DiscordReadiness = {
   interactionUrl: string;
   checks: Array<{ key: string; ok: boolean; detail: string }>;
 };
+
+export type OutboundChatSendRow = {
+  id: string;
+  installation_id: string;
+  broadcaster_user_id: string;
+  sender_user_id: string;
+  message: string;
+  status: "queued" | "sent" | "retry" | "failed";
+  twitch_message_id: string | null;
+  failure_category: string | null;
+  reason: string | null;
+  retry_after_ms: number | null;
+  idempotency_key: string | null;
+  retry_count: number;
+  next_retry_at: string | null;
+  dead_lettered_at: string | null;
+  final_drop_reason: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RelayBotReadinessReport = {
+  ok: true;
+  generatedAt: string;
+  installation: {
+    id: string;
+    name: string;
+    botLogin: string;
+    broadcasterLogin: string;
+  };
+  urls: {
+    publicBaseUrl: string;
+    twitchCallbackUrl: string;
+    twitchEventSubWebhookUrl: string;
+    discordInteractionUrl: string;
+  };
+  checks: Array<{
+    key: string;
+    ok: boolean;
+    state: "ready" | "todo" | "degraded" | "blocked";
+    detail: string;
+  }>;
+  counts: {
+    queuedTwitchChatEvents: number;
+    queuedDiscordInteractions: number;
+    suggestions: Record<DiscordSuggestionStatus, number>;
+    outboundSends: {
+      queued: number;
+      sent: number;
+      retry: number;
+      failed: number;
+      deadLettered: number;
+    };
+  };
+  latest: {
+    eventSubRegistration: Record<string, unknown> | null;
+    discordCommandRegistration: Record<string, unknown> | null;
+    outboundSend: Record<string, unknown> | null;
+  };
+};
