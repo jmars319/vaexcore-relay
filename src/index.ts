@@ -1280,6 +1280,10 @@ const getReadiness = async (
   const broadcasterScopes = broadcasterGrant
     ? (JSON.parse(broadcasterGrant.scopes_json) as string[])
     : [];
+  const accountSeparation = botAccountSeparationReadiness(
+    botGrant,
+    broadcasterGrant,
+  );
   const checks = [
     {
       key: "twitch-client-id",
@@ -1346,21 +1350,37 @@ const getReadiness = async (
     },
     {
       key: "separate-bot-account",
-      ok:
-        Boolean(botGrant?.user_id && broadcasterGrant?.user_id) &&
-        botGrant?.user_id !== broadcasterGrant?.user_id,
-      detail:
-        botGrant &&
-        broadcasterGrant &&
-        botGrant.user_id === broadcasterGrant.user_id
-          ? "Twitch will not show the broadcaster account as a chatbot."
-          : "Bot and broadcaster accounts are separate.",
+      ok: accountSeparation.ok,
+      detail: accountSeparation.detail,
     },
   ];
   return {
     ready: checks.every((check) => check.ok),
     mode: "relay-chatbot",
     checks,
+  };
+};
+
+const botAccountSeparationReadiness = (
+  botGrant: OAuthGrantRow | null,
+  broadcasterGrant: OAuthGrantRow | null,
+) => {
+  if (!botGrant || !broadcasterGrant) {
+    return {
+      ok: false,
+      detail:
+        "Complete both bot and broadcaster OAuth grants before confirming account separation.",
+    };
+  }
+  if (botGrant.user_id === broadcasterGrant.user_id) {
+    return {
+      ok: false,
+      detail: "Twitch will not show the broadcaster account as a chatbot.",
+    };
+  }
+  return {
+    ok: true,
+    detail: "Bot and broadcaster accounts are separate.",
   };
 };
 

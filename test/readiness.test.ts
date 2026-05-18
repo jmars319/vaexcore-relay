@@ -177,6 +177,36 @@ test("console readiness report is redacted and includes queue counts", async () 
   assert.equal(body.latest.outboundSend.final_drop_reason, "denied");
   assert.equal(JSON.stringify(body).includes("console-token"), false);
   assert.equal(JSON.stringify(body).includes("actual-secret-value"), false);
+  assert.equal(JSON.stringify(body).includes("discord-token"), false);
+  assert.equal(JSON.stringify(body).includes("oauth-response-secret"), false);
+});
+
+test("console readiness separates missing grants from account-separation validation", async () => {
+  const consoleToken = "console-token";
+  const env = fakeEnv(await sha256Base64Url(consoleToken), {
+    grants: "missing",
+  });
+  const response = await relayWorker.fetch(
+    new Request(
+      "https://relay.example/api/console/status?installationId=installation-1",
+      {
+        headers: { authorization: `Bearer ${consoleToken}` },
+      },
+    ),
+    env,
+    fakeExecutionContext(),
+  );
+  const body = (await response.json()) as Record<string, any>;
+  const accountCheck = body.readiness.checks.find(
+    (check: { key: string }) => check.key === "separate-bot-account",
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(accountCheck.ok, false);
+  assert.match(
+    accountCheck.detail,
+    /Complete both bot and broadcaster OAuth grants/,
+  );
 });
 
 test("admin diagnostics are protected and redacted", async () => {
@@ -206,7 +236,11 @@ test("admin diagnostics are protected and redacted", async () => {
   assert.equal(JSON.stringify(body).includes("discord-token"), false);
 });
 
-const fakeEnv = (consoleTokenHash: string) =>
+type FakeDbOptions = {
+  grants?: "ready" | "missing" | "same-account";
+};
+
+const fakeEnv = (consoleTokenHash: string, options: FakeDbOptions = {}) =>
   ({
     PUBLIC_BASE_URL: "https://relay.example",
     TWITCH_REDIRECT_URI: "https://relay.example/oauth/twitch/callback",
@@ -220,7 +254,7 @@ const fakeEnv = (consoleTokenHash: string) =>
     DISCORD_APPLICATION_ID: "discord-app",
     DISCORD_GUILD_ID: "discord-guild",
     DISCORD_OPERATOR_ROLE_ID: "operator-role",
-    DB: fakeDb(consoleTokenHash),
+    DB: fakeDb(consoleTokenHash, options),
   }) as any;
 
 const fakeExecutionContext = () =>
@@ -305,7 +339,7 @@ const retryDb = () => {
   };
 };
 
-const fakeDb = (consoleTokenHash: string) => ({
+const fakeDb = (consoleTokenHash: string, options: FakeDbOptions = {}) => ({
   prepare(sql: string) {
     const statement = {
       bindings: [] as unknown[],
@@ -314,7 +348,12 @@ const fakeDb = (consoleTokenHash: string) => ({
         return this;
       },
       async first<T>() {
-        return firstForSql(sql, this.bindings, consoleTokenHash) as T | null;
+        return firstForSql(
+          sql,
+          this.bindings,
+          consoleTokenHash,
+          options,
+        ) as T | null;
       },
       async all<T>() {
         return { results: allForSql(sql) as T[] };
@@ -334,6 +373,7 @@ const firstForSql = (
   sql: string,
   bindings: unknown[],
   consoleTokenHash: string,
+  options: FakeDbOptions,
 ) => {
   if (sql.includes("SELECT * FROM installations WHERE id")) {
     return {
@@ -349,12 +389,20 @@ const firstForSql = (
     };
   }
   if (sql.includes("FROM oauth_grants") && sql.includes("grant_kind = ?")) {
+    if (options.grants === "missing") {
+      return null;
+    }
     const kind = bindings[1];
     const isBot = kind === "bot";
     return {
       installation_id: "installation-1",
       grant_kind: kind,
-      user_id: isBot ? "bot-1" : "broadcaster-1",
+      user_id:
+        options.grants === "same-account"
+          ? "shared-user"
+          : isBot
+            ? "bot-1"
+            : "broadcaster-1",
       login: isBot ? "vaexcorebot" : "vaexil",
       scopes_json: JSON.stringify(
         isBot
@@ -372,7 +420,8 @@ const firstForSql = (
       application_id: "discord-app",
       guild_id: "discord-guild",
       status: "registered",
-      response_json: "{}",
+      response_json:
+        '{"authorization":"Bearer discord-token","secret":"oauth-response-secret"}',
       created_at: "2026-05-13T12:02:00.000Z",
     };
   }
@@ -382,7 +431,7 @@ const firstForSql = (
       type: "channel.chat.message",
       version: "1",
       status: "created",
-      condition_json: "{}",
+      condition_json: '{"oauth":"oauth-response-secret"}',
       created_at: "2026-05-13T12:01:00.000Z",
       updated_at: "2026-05-13T12:01:00.000Z",
     };
