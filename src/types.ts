@@ -171,6 +171,15 @@ export type OutboundChatSendRow = {
 export type RelayBotReadinessReport = {
   ok: true;
   generatedAt: string;
+  summary: {
+    state: "ready" | "app-check-available" | "degraded" | "failed";
+    detail: string;
+    lastCheckedAt: string;
+    readyCount: number;
+    todoCount: number;
+    degradedCount: number;
+    blockedCount: number;
+  };
   installation: {
     id: string;
     name: string;

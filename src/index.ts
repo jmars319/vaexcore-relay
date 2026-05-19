@@ -1508,10 +1508,12 @@ const getBotReadinessReport = async (
         : "Send a Relay test message from Console after grants are ready.",
     },
   ];
+  const generatedAt = new Date().toISOString();
 
   return {
     ok: true,
-    generatedAt: new Date().toISOString(),
+    generatedAt,
+    summary: relayBotReadinessSummary(checks, generatedAt),
     installation: {
       id: installation.id,
       name: installation.name,
@@ -1531,6 +1533,63 @@ const getBotReadinessReport = async (
     checks,
     counts,
     latest,
+  };
+};
+
+const relayBotReadinessSummary = (
+  checks: RelayBotReadinessReport["checks"],
+  generatedAt: string,
+): RelayBotReadinessReport["summary"] => {
+  const readyCount = checks.filter((check) => check.state === "ready").length;
+  const todoCount = checks.filter((check) => check.state === "todo").length;
+  const degradedCount = checks.filter(
+    (check) => check.state === "degraded",
+  ).length;
+  const blockedCount = checks.filter(
+    (check) => check.state === "blocked",
+  ).length;
+
+  if (blockedCount > 0) {
+    return {
+      state: "failed",
+      detail: `${blockedCount} required Relay code or data check(s) are blocked.`,
+      lastCheckedAt: generatedAt,
+      readyCount,
+      todoCount,
+      degradedCount,
+      blockedCount,
+    };
+  }
+  if (degradedCount > 0) {
+    return {
+      state: "degraded",
+      detail: `${degradedCount} Relay check(s) are degraded; code paths remain inspectable.`,
+      lastCheckedAt: generatedAt,
+      readyCount,
+      todoCount,
+      degradedCount,
+      blockedCount,
+    };
+  }
+  if (todoCount > 0) {
+    return {
+      state: "app-check-available",
+      detail: `${todoCount} app-integrated setup check(s) have not been recorded yet.`,
+      lastCheckedAt: generatedAt,
+      readyCount,
+      todoCount,
+      degradedCount,
+      blockedCount,
+    };
+  }
+  return {
+    state: "ready",
+    detail: "Relay code, queue, schema, and setup checks are ready.",
+    lastCheckedAt: generatedAt,
+    readyCount,
+    todoCount,
+    degradedCount,
+    blockedCount,
   };
 };
 
