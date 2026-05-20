@@ -485,10 +485,16 @@ const handleEventSubWebhook = async (
     throw new HttpError(403, "EventSub signature verification failed.");
   }
   const envelope = JSON.parse(body) as TwitchEventSubEnvelope;
-  if (envelope.metadata?.message_type === "webhook_callback_verification") {
-    return new Response(envelope.payload?.challenge ?? "", {
-      headers: { "Content-Type": "text/plain; charset=utf-8" },
-    });
+  const messageType =
+    request.headers.get("Twitch-Eventsub-Message-Type") ??
+    envelope.metadata?.message_type;
+  if (messageType === "webhook_callback_verification") {
+    return new Response(
+      envelope.challenge ?? envelope.payload?.challenge ?? "",
+      {
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+      },
+    );
   }
   const event = normalizeChatEvent(envelope);
   if (event) {

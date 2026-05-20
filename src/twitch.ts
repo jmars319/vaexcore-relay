@@ -147,10 +147,11 @@ export const verifyEventSubSignature = async (input: {
 export const normalizeChatEvent = (
   envelope: TwitchEventSubEnvelope,
 ): RelayChatEvent | null => {
-  if (envelope.payload?.subscription?.type !== "channel.chat.message") {
+  const subscription = envelope.payload?.subscription ?? envelope.subscription;
+  if (subscription?.type !== "channel.chat.message") {
     return null;
   }
-  const event = envelope.payload.event;
+  const event = envelope.payload?.event ?? envelope.event;
   const text = event?.message?.text;
   const messageId = event?.message_id;
   const userId = event?.chatter_user_id;

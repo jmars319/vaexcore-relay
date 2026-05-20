@@ -69,3 +69,21 @@ test("normalizeChatEvent maps EventSub chat messages to Console-friendly shape",
   assert.equal(normalized?.source, "relay-eventsub");
   assert.equal(normalized?.isVip, true);
 });
+
+test("normalizeChatEvent maps Twitch webhook chat message bodies", () => {
+  const normalized = normalizeChatEvent({
+    subscription: { type: "channel.chat.message" },
+    event: {
+      broadcaster_user_id: "broadcaster",
+      chatter_user_id: "viewer",
+      chatter_user_login: "ViewerLogin",
+      chatter_user_name: "Viewer",
+      message_id: "msg-2",
+      message: { text: "relay inbound test" },
+      badges: [{ set_id: "moderator" }],
+    },
+  });
+  assert.equal(normalized?.id, "msg-2");
+  assert.equal(normalized?.text, "relay inbound test");
+  assert.equal(normalized?.isMod, true);
+});

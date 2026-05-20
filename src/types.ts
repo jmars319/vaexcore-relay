@@ -49,6 +49,23 @@ export type TwitchTokenValidation = {
 };
 
 export type TwitchEventSubEnvelope = {
+  challenge?: string;
+  subscription?: {
+    id?: string;
+    type?: string;
+    version?: string;
+    status?: string;
+    condition?: Record<string, unknown>;
+  };
+  event?: {
+    broadcaster_user_id?: string;
+    chatter_user_id?: string;
+    chatter_user_login?: string;
+    chatter_user_name?: string;
+    message_id?: string;
+    message?: { text?: string };
+    badges?: Array<{ set_id?: string }>;
+  };
   metadata?: {
     message_id?: string;
     message_type?: string;
