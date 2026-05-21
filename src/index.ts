@@ -45,7 +45,10 @@ import {
   type OAuthGrantRow,
   type OutboundChatSendRow,
   type RelayBotReadinessReport,
+  type RelayFreshness,
+  type RelayQueueHealth,
   type RelayReadiness,
+  type RelaySchemaReadiness,
   type TwitchEventSubEnvelope,
   requiredBotScopes,
   requiredBroadcasterScopes,
@@ -108,10 +111,22 @@ export default {
       }
       if (request.method === "GET" && url.pathname === "/api/console/status") {
         const installation = await requireConsole(request, env, url);
+        const [readiness, schema, queues, freshness, latest] =
+          await Promise.all([
+            getReadiness(env, installation.id),
+            getSchemaReadiness(env),
+            getQueueHealth(env, installation.id),
+            getFreshness(env, installation.id),
+            getLatestReadinessRecords(env, installation.id),
+          ]);
         return json({
           ok: true,
           installation: safeInstallation(installation),
-          readiness: await getReadiness(env, installation.id),
+          readiness,
+          schema,
+          queues,
+          freshness,
+          latestRecordMetadata: latestRecordMetadata(latest),
         });
       }
       if (
@@ -1463,23 +1478,28 @@ const getBotReadinessReport = async (
   env: RelayEnv,
   installation: InstallationRow,
 ): Promise<RelayBotReadinessReport> => {
-  const [twitch, discord, tables, counts, latest] = await Promise.all([
-    getReadiness(env, installation.id),
-    getDiscordReadiness(env, installation.id),
-    getTableReadiness(env),
-    getReadinessCounts(env, installation.id),
-    getLatestReadinessRecords(env, installation.id),
-  ]);
+  const [twitch, discord, schema, counts, latest, queues, freshness] =
+    await Promise.all([
+      getReadiness(env, installation.id),
+      getDiscordReadiness(env, installation.id),
+      getSchemaReadiness(env),
+      getReadinessCounts(env, installation.id),
+      getLatestReadinessRecords(env, installation.id),
+      getQueueHealth(env, installation.id),
+      getFreshness(env, installation.id),
+    ]);
   const publicBaseUrl = env.PUBLIC_BASE_URL ?? "";
   const checks: RelayBotReadinessReport["checks"] = [
-    ...tables.map((table): RelayBotReadinessReport["checks"][number] => ({
-      key: `d1-table-${table.name}`,
-      ok: table.exists,
-      state: table.exists ? "ready" : "blocked",
-      detail: table.exists
-        ? `${table.name} table exists.`
-        : `${table.name} table is missing; apply D1 migrations.`,
-    })),
+    ...schema.tables.map(
+      (table): RelayBotReadinessReport["checks"][number] => ({
+        key: `d1-table-${table.name}`,
+        ok: table.exists,
+        state: table.exists ? "ready" : "blocked",
+        detail: table.exists
+          ? `${table.name} table exists.`
+          : `${table.name} table is missing; apply D1 migrations.`,
+      }),
+    ),
     ...twitch.checks.map(
       (check): RelayBotReadinessReport["checks"][number] => ({
         ...check,
@@ -1499,6 +1519,40 @@ const getBotReadinessReport = async (
       detail: latest.eventSubRegistration
         ? `Latest EventSub registration status is ${latest.eventSubRegistration.status}.`
         : "Register EventSub from Console after Twitch OAuth grants are ready.",
+    },
+    {
+      key: "eventsub-freshness",
+      ok: freshness.eventSub.present,
+      state: freshness.eventSub.present ? "ready" : "todo",
+      detail: freshness.eventSub.present
+        ? `Latest EventSub registration updated at ${freshness.eventSub.latestUpdatedAt}.`
+        : "No EventSub registration record exists yet.",
+    },
+    {
+      key: "discord-command-registration-freshness",
+      ok: freshness.discordCommandRegistration.present,
+      state: freshness.discordCommandRegistration.present ? "ready" : "todo",
+      detail: freshness.discordCommandRegistration.present
+        ? `Latest Discord command registration was ${freshness.discordCommandRegistration.latestStatus} at ${freshness.discordCommandRegistration.latestCreatedAt}.`
+        : "No Discord slash command registration record exists yet.",
+    },
+    {
+      key: "outbound-retry-queue",
+      ok: queues.outboundRetry.dueRetry === 0,
+      state: queues.outboundRetry.dueRetry === 0 ? "ready" : "degraded",
+      detail:
+        queues.outboundRetry.dueRetry === 0
+          ? "No outbound chat retries are due right now."
+          : `${queues.outboundRetry.dueRetry} outbound chat retry item(s) are due.`,
+    },
+    {
+      key: "outbound-dead-letter",
+      ok: queues.outboundRetry.deadLettered === 0,
+      state: queues.outboundRetry.deadLettered === 0 ? "ready" : "degraded",
+      detail:
+        queues.outboundRetry.deadLettered === 0
+          ? "No outbound chat sends are dead-lettered."
+          : `${queues.outboundRetry.deadLettered} outbound chat send(s) are dead-lettered.`,
     },
     {
       key: "latest-outbound-send",
@@ -1538,7 +1592,11 @@ const getBotReadinessReport = async (
     },
     checks,
     counts,
+    schema,
+    queues,
+    freshness,
     latest,
+    latestRecordMetadata: latestRecordMetadata(latest),
   };
 };
 
@@ -1613,6 +1671,60 @@ const requiredTables = [
   "discord_command_registrations",
 ] as const;
 
+const getSchemaReadiness = async (
+  env: RelayEnv,
+): Promise<RelaySchemaReadiness> => {
+  const [tables, migrations] = await Promise.all([
+    getTableReadiness(env),
+    getMigrationReadiness(env),
+  ]);
+  const missingTables = tables
+    .filter((table) => !table.exists)
+    .map((table) => table.name);
+
+  return {
+    ready: missingTables.length === 0,
+    requiredTables: tables.length,
+    presentTables: tables.length - missingTables.length,
+    missingTables,
+    tables,
+    migrations,
+  };
+};
+
+const getMigrationReadiness = async (
+  env: RelayEnv,
+): Promise<RelaySchemaReadiness["migrations"]> => {
+  try {
+    const [count, latest] = await Promise.all([
+      env.DB.prepare("SELECT COUNT(*) AS count FROM d1_migrations").first<{
+        count: number;
+      }>(),
+      env.DB.prepare(
+        `
+          SELECT name, applied_at
+          FROM d1_migrations
+          ORDER BY applied_at DESC, name DESC
+          LIMIT 1
+        `,
+      ).first<{ name: string; applied_at: string }>(),
+    ]);
+    return {
+      tablePresent: true,
+      appliedCount: count?.count ?? 0,
+      latestName: latest?.name ?? "",
+      latestAppliedAt: latest?.applied_at ?? "",
+    };
+  } catch {
+    return {
+      tablePresent: false,
+      appliedCount: 0,
+      latestName: "",
+      latestAppliedAt: "",
+    };
+  }
+};
+
 const getTableReadiness = async (env: RelayEnv) => {
   const rows = await env.DB.prepare(
     `
@@ -1623,6 +1735,121 @@ const getTableReadiness = async (env: RelayEnv) => {
   ).all<{ name: string }>();
   const names = new Set(rows.results.map((row) => row.name));
   return requiredTables.map((name) => ({ name, exists: names.has(name) }));
+};
+
+const getQueueHealth = async (
+  env: RelayEnv,
+  installationId: string,
+): Promise<RelayQueueHealth> => {
+  const generatedAt = new Date().toISOString();
+  const [chatEvents, discordInteractions, outboundRetry] = await Promise.all([
+    env.DB.prepare(
+      `
+        SELECT COUNT(*) AS count, MIN(received_at) AS oldest_received_at
+        FROM chat_events
+        WHERE installation_id = ? AND delivered_at IS NULL
+      `,
+    )
+      .bind(installationId)
+      .first<{ count: number; oldest_received_at: string | null }>(),
+    env.DB.prepare(
+      `
+        SELECT COUNT(*) AS count, MIN(created_at) AS oldest_created_at
+        FROM discord_interactions
+        WHERE installation_id = ? AND status = 'queued' AND delivered_at IS NULL
+      `,
+    )
+      .bind(installationId)
+      .first<{ count: number; oldest_created_at: string | null }>(),
+    env.DB.prepare(
+      `
+        SELECT
+          SUM(CASE WHEN status = 'retry' THEN 1 ELSE 0 END) AS retry,
+          SUM(CASE WHEN status = 'retry' AND (next_retry_at IS NULL OR next_retry_at <= ?) THEN 1 ELSE 0 END) AS due_retry,
+          SUM(CASE WHEN dead_lettered_at IS NULL THEN 0 ELSE 1 END) AS dead_lettered,
+          MIN(CASE WHEN status = 'retry' THEN next_retry_at ELSE NULL END) AS oldest_next_retry_at,
+          MAX(dead_lettered_at) AS latest_dead_lettered_at
+        FROM outbound_chat_sends
+        WHERE installation_id = ?
+      `,
+    )
+      .bind(generatedAt, installationId)
+      .first<{
+        retry: number | null;
+        due_retry: number | null;
+        dead_lettered: number | null;
+        oldest_next_retry_at: string | null;
+        latest_dead_lettered_at: string | null;
+      }>(),
+  ]);
+
+  return {
+    generatedAt,
+    twitchChatEvents: {
+      queued: chatEvents?.count ?? 0,
+      oldestReceivedAt: chatEvents?.oldest_received_at ?? "",
+      oldestAgeMs: ageMs(generatedAt, chatEvents?.oldest_received_at),
+    },
+    discordInteractions: {
+      queued: discordInteractions?.count ?? 0,
+      oldestCreatedAt: discordInteractions?.oldest_created_at ?? "",
+      oldestAgeMs: ageMs(generatedAt, discordInteractions?.oldest_created_at),
+    },
+    outboundRetry: {
+      retry: outboundRetry?.retry ?? 0,
+      dueRetry: outboundRetry?.due_retry ?? 0,
+      deadLettered: outboundRetry?.dead_lettered ?? 0,
+      oldestNextRetryAt: outboundRetry?.oldest_next_retry_at ?? "",
+      oldestRetryAgeMs: ageMs(generatedAt, outboundRetry?.oldest_next_retry_at),
+      latestDeadLetteredAt: outboundRetry?.latest_dead_lettered_at ?? "",
+    },
+  };
+};
+
+const getFreshness = async (
+  env: RelayEnv,
+  installationId: string,
+): Promise<RelayFreshness> => {
+  const generatedAt = new Date().toISOString();
+  const [eventSub, discordCommandRegistration] = await Promise.all([
+    env.DB.prepare(
+      `
+        SELECT status, updated_at
+        FROM eventsub_subscriptions
+        WHERE installation_id = ?
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `,
+    )
+      .bind(installationId)
+      .first<{ status: string; updated_at: string }>(),
+    env.DB.prepare(
+      `
+        SELECT status, created_at
+        FROM discord_command_registrations
+        WHERE installation_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+      `,
+    )
+      .bind(installationId)
+      .first<{ status: string; created_at: string }>(),
+  ]);
+
+  return {
+    eventSub: {
+      present: Boolean(eventSub),
+      latestStatus: eventSub?.status ?? "",
+      latestUpdatedAt: eventSub?.updated_at ?? "",
+      ageMs: ageMs(generatedAt, eventSub?.updated_at),
+    },
+    discordCommandRegistration: {
+      present: Boolean(discordCommandRegistration),
+      latestStatus: discordCommandRegistration?.status ?? "",
+      latestCreatedAt: discordCommandRegistration?.created_at ?? "",
+      ageMs: ageMs(generatedAt, discordCommandRegistration?.created_at),
+    },
+  };
 };
 
 const getReadinessCounts = async (
@@ -1756,6 +1983,44 @@ const getLatestReadinessRecords = async (
   };
 };
 
+const latestRecordMetadata = (
+  latest: RelayBotReadinessReport["latest"],
+): RelayBotReadinessReport["latestRecordMetadata"] => ({
+  eventSubRegistration: recordMetadata(latest.eventSubRegistration, [
+    "status",
+    "type",
+    "version",
+    "created_at",
+    "updated_at",
+  ]),
+  discordCommandRegistration: recordMetadata(
+    latest.discordCommandRegistration,
+    ["status", "application_id", "guild_id", "created_at"],
+  ),
+  outboundSend: recordMetadata(latest.outboundSend, [
+    "status",
+    "failure_category",
+    "retry_count",
+    "next_retry_at",
+    "dead_lettered_at",
+    "created_at",
+    "updated_at",
+  ]),
+});
+
+const recordMetadata = (
+  record: Record<string, unknown> | null,
+  fields: string[],
+) => {
+  if (!record) {
+    return { present: false };
+  }
+  return {
+    present: true,
+    ...Object.fromEntries(fields.map((field) => [field, record[field] ?? ""])),
+  };
+};
+
 const countRows = async (
   env: RelayEnv,
   table: string,
@@ -1770,9 +2035,17 @@ const countRows = async (
   return row?.count ?? 0;
 };
 
+const ageMs = (generatedAt: string, timestamp: string | null | undefined) => {
+  if (!timestamp) return null;
+  const generated = Date.parse(generatedAt);
+  const then = Date.parse(timestamp);
+  if (!Number.isFinite(generated) || !Number.isFinite(then)) return null;
+  return Math.max(0, generated - then);
+};
+
 const getAdminDiagnostics = async (env: RelayEnv) => {
-  const [tables, queues, eventSub, discord, audit] = await Promise.all([
-    getTableReadiness(env),
+  const [schema, queues, eventSub, discord, audit] = await Promise.all([
+    getSchemaReadiness(env),
     getAdminQueueDiagnostics(env),
     getEventSubDiagnostics(env),
     getDiscordAdminDiagnostics(env),
@@ -1795,7 +2068,8 @@ const getAdminDiagnostics = async (env: RelayEnv) => {
       hasDiscordGuildId: Boolean(env.DISCORD_GUILD_ID),
       discordInteractionUrl: discordInteractionUrl(env),
     },
-    tables,
+    tables: schema.tables,
+    schema,
     queues,
     eventSub,
     discord,

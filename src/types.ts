@@ -116,6 +116,57 @@ export type RelayReadiness = {
   checks: Array<{ key: string; ok: boolean; detail: string }>;
 };
 
+export type RelaySchemaReadiness = {
+  ready: boolean;
+  requiredTables: number;
+  presentTables: number;
+  missingTables: string[];
+  tables: Array<{ name: string; exists: boolean }>;
+  migrations: {
+    tablePresent: boolean;
+    appliedCount: number;
+    latestName: string;
+    latestAppliedAt: string;
+  };
+};
+
+export type RelayQueueHealth = {
+  generatedAt: string;
+  twitchChatEvents: {
+    queued: number;
+    oldestReceivedAt: string;
+    oldestAgeMs: number | null;
+  };
+  discordInteractions: {
+    queued: number;
+    oldestCreatedAt: string;
+    oldestAgeMs: number | null;
+  };
+  outboundRetry: {
+    retry: number;
+    dueRetry: number;
+    deadLettered: number;
+    oldestNextRetryAt: string;
+    oldestRetryAgeMs: number | null;
+    latestDeadLetteredAt: string;
+  };
+};
+
+export type RelayFreshness = {
+  eventSub: {
+    present: boolean;
+    latestStatus: string;
+    latestUpdatedAt: string;
+    ageMs: number | null;
+  };
+  discordCommandRegistration: {
+    present: boolean;
+    latestStatus: string;
+    latestCreatedAt: string;
+    ageMs: number | null;
+  };
+};
+
 export type DiscordSuggestionStatus =
   | "new"
   | "reviewed"
@@ -227,9 +278,17 @@ export type RelayBotReadinessReport = {
       deadLettered: number;
     };
   };
+  schema: RelaySchemaReadiness;
+  queues: RelayQueueHealth;
+  freshness: RelayFreshness;
   latest: {
     eventSubRegistration: Record<string, unknown> | null;
     discordCommandRegistration: Record<string, unknown> | null;
     outboundSend: Record<string, unknown> | null;
+  };
+  latestRecordMetadata: {
+    eventSubRegistration: Record<string, unknown>;
+    discordCommandRegistration: Record<string, unknown>;
+    outboundSend: Record<string, unknown>;
   };
 };

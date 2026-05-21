@@ -174,7 +174,27 @@ test("console readiness report is redacted and includes queue counts", async () 
   assert.equal(body.counts.queuedDiscordInteractions, 1);
   assert.equal(body.counts.suggestions.new, 3);
   assert.equal(body.counts.outboundSends.deadLettered, 1);
+  assert.equal(body.schema.ready, true);
+  assert.equal(body.schema.presentTables, body.schema.requiredTables);
+  assert.equal(body.schema.migrations.appliedCount, 3);
+  assert.equal(body.queues.twitchChatEvents.queued, 2);
+  assert.equal(
+    body.queues.twitchChatEvents.oldestReceivedAt,
+    "2026-05-13T11:55:00.000Z",
+  );
+  assert.equal(body.queues.outboundRetry.dueRetry, 1);
+  assert.equal(body.queues.outboundRetry.deadLettered, 1);
+  assert.equal(body.freshness.eventSub.latestStatus, "created");
+  assert.equal(
+    body.freshness.discordCommandRegistration.latestStatus,
+    "registered",
+  );
   assert.equal(body.latest.outboundSend.final_drop_reason, "denied");
+  assert.equal(body.latestRecordMetadata.outboundSend.status, "failed");
+  assert.equal(
+    body.latestRecordMetadata.discordCommandRegistration.present,
+    true,
+  );
   assert.equal(body.summary.state, "degraded");
   assert.equal(body.summary.lastCheckedAt, body.generatedAt);
   assert.ok(body.summary.readyCount > 0);
@@ -233,6 +253,7 @@ test("admin diagnostics are protected and redacted", async () => {
   assert.equal(response.status, 200);
   assert.equal(body.ok, true);
   assert.equal(body.configuration.hasDiscordBotToken, true);
+  assert.equal(body.schema.ready, true);
   assert.equal(body.queues.outboundChatSends.deadLettered, 1);
   assert.equal(body.eventSub.staleCount, 0);
   assert.equal(JSON.stringify(body).includes("actual-secret-value"), false);
@@ -428,6 +449,15 @@ const firstForSql = (
       created_at: "2026-05-13T12:02:00.000Z",
     };
   }
+  if (sql.includes("COUNT(*) AS count FROM d1_migrations")) {
+    return { count: 3 };
+  }
+  if (sql.includes("FROM d1_migrations")) {
+    return {
+      name: "0003_bot_readiness.sql",
+      applied_at: "2026-05-13T12:04:00.000Z",
+    };
+  }
   if (sql.includes("FROM eventsub_subscriptions")) {
     return {
       twitch_subscription_id: "sub-1",
@@ -437,6 +467,33 @@ const firstForSql = (
       condition_json: '{"oauth":"oauth-response-secret"}',
       created_at: "2026-05-13T12:01:00.000Z",
       updated_at: "2026-05-13T12:01:00.000Z",
+    };
+  }
+  if (sql.includes("MIN(received_at)") && sql.includes("FROM chat_events")) {
+    return {
+      count: 2,
+      oldest_received_at: "2026-05-13T11:55:00.000Z",
+    };
+  }
+  if (
+    sql.includes("MIN(created_at)") &&
+    sql.includes("FROM discord_interactions")
+  ) {
+    return {
+      count: 1,
+      oldest_created_at: "2026-05-13T11:56:00.000Z",
+    };
+  }
+  if (
+    sql.includes("oldest_next_retry_at") &&
+    sql.includes("FROM outbound_chat_sends")
+  ) {
+    return {
+      retry: 1,
+      due_retry: 1,
+      dead_lettered: 1,
+      oldest_next_retry_at: "2026-05-13T11:59:00.000Z",
+      latest_dead_lettered_at: "2026-05-13T12:03:00.000Z",
     };
   }
   if (
