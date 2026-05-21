@@ -191,7 +191,7 @@ export default {
         url.pathname === "/api/console/discord/setup/preview"
       ) {
         const installation = await requireConsole(request, env, url);
-        return previewHostedDiscordSetup(
+        return await previewHostedDiscordSetup(
           await readJson(request),
           env,
           installation.id,
@@ -202,7 +202,7 @@ export default {
         url.pathname === "/api/console/discord/setup/apply"
       ) {
         const installation = await requireConsole(request, env, url);
-        return applyHostedDiscordSetup(
+        return await applyHostedDiscordSetup(
           await readJson(request),
           env,
           installation.id,
@@ -708,14 +708,17 @@ const applyHostedDiscordSetup = async (
   const input = objectInput(body);
   const config = await requireHostedDiscordGuild(env, installationId);
   const setup = hostedDiscordSetupOptions(input, config);
+  const client = createHostedDiscordClient(env);
+  const bot = await client.getCurrentUser();
   const result = await applyDiscordServerSetup({
-    client: createHostedDiscordClient(env),
+    client,
     guildId: setup.guildId,
     template: setup.template,
     includeRoles: setup.includeRoles,
     applyPermissions: setup.applyPermissions,
     postStarterMessages: setup.postStarterMessages,
     existingMessageIds: setup.existingMessageIds,
+    botRoleId: bot.id,
   });
   const createdChannelIds = {
     ...jsonRecord(config.created_channel_ids_json),

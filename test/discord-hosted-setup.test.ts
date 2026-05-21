@@ -9,6 +9,7 @@ import relayWorker from "../src/index";
 import { sha256Base64Url } from "../src/crypto";
 
 const guildId = "123456789012345678";
+const botUserId = "999999999999999999";
 const botToken = "discord-token";
 
 test("hosted Discord setup previews, applies, stores IDs, and stays idempotent", async () => {
@@ -256,7 +257,10 @@ async function startFakeDiscord() {
         position: 1,
       },
     ],
-    roles: [{ id: guildId, name: "@everyone", managed: false }],
+    roles: [
+      { id: guildId, name: "@everyone", managed: false },
+      { id: botUserId, name: "VaexCore", managed: true },
+    ],
     messages: [] as Array<{ id: string; content: string }>,
     permissionOverwrites: [] as Array<{ path: string; body: unknown }>,
   };
@@ -269,6 +273,15 @@ async function startFakeDiscord() {
 
     if (request.headers.authorization !== `Bot ${botToken}`) {
       send(response, 401, { message: "Unauthorized" });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/v10/users/@me") {
+      send(response, 200, {
+        id: botUserId,
+        username: "VaexCoreBot",
+        discriminator: "0000",
+      });
       return;
     }
 
