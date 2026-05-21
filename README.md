@@ -131,6 +131,13 @@ npm run dev
 
 Use local Wrangler development for endpoint smoke checks. Real Twitch EventSub validation requires a public Worker URL and configured Twitch application callback URLs.
 
+## Local Tooling
+
+- Use `wrangler` for Cloudflare Worker development, D1 binding checks, secrets setup, and deployment diagnostics.
+- Use OrbStack with `docker` or `docker compose` when local service parity requires containers.
+- Use `actionlint` after editing GitHub Actions workflows.
+- Use `osv-scanner` for broad dependency advisory checks across manifests and lockfiles.
+
 ## Direction
 
 - Keep Relay focused on hosted integration flows that cannot be local-only.
