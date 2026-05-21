@@ -74,7 +74,7 @@ const maxJsonBytes = 64 * 1024;
 const maxOutboundRetryAttempts = 3;
 const outboundRetryBatchLimit = 25;
 const defaultRetryBackoffMs = 60_000;
-const hostedDiscordSetupMutationLimit = 25;
+const hostedDiscordSetupMutationLimit = 15;
 
 type RelayEnv = Env & {
   TWITCH_CLIENT_ID: string;
