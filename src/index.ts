@@ -718,7 +718,7 @@ const applyHostedDiscordSetup = async (
     applyPermissions: setup.applyPermissions,
     postStarterMessages: setup.postStarterMessages,
     existingMessageIds: setup.existingMessageIds,
-    botRoleId: bot.id,
+    botUserId: bot.id,
   });
   const createdChannelIds = {
     ...jsonRecord(config.created_channel_ids_json),

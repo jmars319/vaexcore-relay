@@ -259,7 +259,7 @@ async function startFakeDiscord() {
     ],
     roles: [
       { id: guildId, name: "@everyone", managed: false },
-      { id: botUserId, name: "VaexCore", managed: true },
+      { id: "777777777777777777", name: "VaexCore", managed: true },
     ],
     messages: [] as Array<{ id: string; content: string }>,
     permissionOverwrites: [] as Array<{ path: string; body: unknown }>,
@@ -343,6 +343,18 @@ async function startFakeDiscord() {
       /^\/api\/v10\/channels\/\d+\/permissions\/\d+$/.test(url.pathname)
     ) {
       const body = await readBody(request);
+      const overwriteId = url.pathname.split("/").at(-1);
+      if (
+        body.type === 0 &&
+        !state.roles.some((role) => role.id === overwriteId)
+      ) {
+        send(response, 404, { message: "Unknown Overwrite", code: 10009 });
+        return;
+      }
+      if (body.type === 1 && overwriteId !== botUserId) {
+        send(response, 404, { message: "Unknown Member", code: 10007 });
+        return;
+      }
       const existingIndex = state.permissionOverwrites.findIndex(
         (item) => item.path === url.pathname,
       );
