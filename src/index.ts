@@ -1574,6 +1574,13 @@ const getBotReadinessReport = async (
     ok: true,
     generatedAt,
     summary: relayBotReadinessSummary(checks, generatedAt),
+    codeReadiness: relayCodeReadinessSummary({
+      generatedAt,
+      schema,
+      queues,
+      freshness,
+      latestRecordMetadata: latestRecordMetadata(latest),
+    }),
     installation: {
       id: installation.id,
       name: installation.name,
@@ -1654,6 +1661,54 @@ const relayBotReadinessSummary = (
     todoCount,
     degradedCount,
     blockedCount,
+  };
+};
+
+const relayCodeReadinessSummary = ({
+  generatedAt,
+  schema,
+  queues,
+  freshness,
+  latestRecordMetadata,
+}: {
+  generatedAt: string;
+  schema: RelaySchemaReadiness;
+  queues: RelayQueueHealth;
+  freshness: RelayFreshness;
+  latestRecordMetadata: RelayBotReadinessReport["codeReadiness"]["latestRecordMetadata"];
+}): RelayBotReadinessReport["codeReadiness"] => {
+  const retryReady = queues.outboundRetry.dueRetry === 0;
+  const deadLetterReady = queues.outboundRetry.deadLettered === 0;
+  const queueReady = retryReady && deadLetterReady;
+  const eventSubFresh = freshness.eventSub.present;
+  const discordCommandsFresh = freshness.discordCommandRegistration.present;
+  const blocked = !schema.ready;
+  const degraded =
+    !blocked && (!queueReady || !eventSubFresh || !discordCommandsFresh);
+  const state = blocked ? "blocked" : degraded ? "degraded" : "ready";
+  const detail =
+    state === "ready"
+      ? "Relay schema, queues, freshness, and latest-record metadata are code-ready."
+      : state === "blocked"
+        ? "Relay D1 schema is missing required tables or migrations."
+        : "Relay code is inspectable, with queue or freshness items needing operator attention.";
+
+  return {
+    state,
+    detail,
+    lastCheckedAt: generatedAt,
+    schemaReady: schema.ready,
+    queueReady,
+    retryReady,
+    deadLetterReady,
+    eventSubFresh,
+    discordCommandsFresh,
+    queueAges: {
+      twitchChatOldestAgeMs: queues.twitchChatEvents.oldestAgeMs,
+      discordInteractionOldestAgeMs: queues.discordInteractions.oldestAgeMs,
+      outboundRetryOldestAgeMs: queues.outboundRetry.oldestRetryAgeMs,
+    },
+    latestRecordMetadata,
   };
 };
 

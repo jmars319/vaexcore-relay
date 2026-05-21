@@ -248,6 +248,27 @@ export type RelayBotReadinessReport = {
     degradedCount: number;
     blockedCount: number;
   };
+  codeReadiness: {
+    state: "ready" | "degraded" | "blocked";
+    detail: string;
+    lastCheckedAt: string;
+    schemaReady: boolean;
+    queueReady: boolean;
+    retryReady: boolean;
+    deadLetterReady: boolean;
+    eventSubFresh: boolean;
+    discordCommandsFresh: boolean;
+    queueAges: {
+      twitchChatOldestAgeMs: number | null;
+      discordInteractionOldestAgeMs: number | null;
+      outboundRetryOldestAgeMs: number | null;
+    };
+    latestRecordMetadata: {
+      eventSubRegistration: Record<string, unknown>;
+      discordCommandRegistration: Record<string, unknown>;
+      outboundSend: Record<string, unknown>;
+    };
+  };
   installation: {
     id: string;
     name: string;

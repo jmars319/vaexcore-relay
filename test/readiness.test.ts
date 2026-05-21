@@ -198,6 +198,20 @@ test("console readiness report is redacted and includes queue counts", async () 
   assert.equal(body.summary.state, "degraded");
   assert.equal(body.summary.lastCheckedAt, body.generatedAt);
   assert.ok(body.summary.readyCount > 0);
+  assert.equal(body.codeReadiness.state, "degraded");
+  assert.equal(body.codeReadiness.schemaReady, true);
+  assert.equal(body.codeReadiness.retryReady, false);
+  assert.equal(body.codeReadiness.deadLetterReady, false);
+  assert.equal(body.codeReadiness.eventSubFresh, true);
+  assert.equal(body.codeReadiness.discordCommandsFresh, true);
+  assert.equal(
+    body.codeReadiness.queueAges.twitchChatOldestAgeMs,
+    body.queues.twitchChatEvents.oldestAgeMs,
+  );
+  assert.equal(
+    body.codeReadiness.latestRecordMetadata.outboundSend.status,
+    "failed",
+  );
   assert.equal(JSON.stringify(body).includes("console-token"), false);
   assert.equal(JSON.stringify(body).includes("actual-secret-value"), false);
   assert.equal(JSON.stringify(body).includes("discord-token"), false);
