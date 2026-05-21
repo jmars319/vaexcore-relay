@@ -74,6 +74,7 @@ const maxJsonBytes = 64 * 1024;
 const maxOutboundRetryAttempts = 3;
 const outboundRetryBatchLimit = 25;
 const defaultRetryBackoffMs = 60_000;
+const hostedDiscordSetupMutationLimit = 25;
 
 type RelayEnv = Env & {
   TWITCH_CLIENT_ID: string;
@@ -719,6 +720,7 @@ const applyHostedDiscordSetup = async (
     postStarterMessages: setup.postStarterMessages,
     existingMessageIds: setup.existingMessageIds,
     botUserId: bot.id,
+    maxMutations: hostedDiscordSetupMutationLimit,
   });
   const createdChannelIds = {
     ...jsonRecord(config.created_channel_ids_json),
@@ -741,6 +743,9 @@ const applyHostedDiscordSetup = async (
     config.operator_role_id ??
     env.DISCORD_OPERATOR_ROLE_ID ??
     null;
+  const setupAppliedAt = result.needsContinuation
+    ? (config.setup_applied_at ?? null)
+    : result.appliedAt;
   const now = new Date().toISOString();
   await env.DB.prepare(
     `
@@ -762,7 +767,7 @@ const applyHostedDiscordSetup = async (
   )
     .bind(
       setup.template.id,
-      result.appliedAt,
+      setupAppliedAt,
       starterMessagesAppliedAt,
       result.recommended.streamAnnouncementChannelId ??
         config.stream_announcement_channel_id ??
@@ -791,6 +796,8 @@ const applyHostedDiscordSetup = async (
     permissionOverwritesApplied: result.permissionOverwritesApplied,
     starterMessagesPosted: result.starterMessagesPosted,
     operatorRoleId,
+    needsContinuation: result.needsContinuation,
+    mutationsApplied: result.mutationsApplied,
   });
   return json({
     ...result,

@@ -11,6 +11,12 @@ import { sha256Base64Url } from "../src/crypto";
 const guildId = "123456789012345678";
 const botUserId = "999999999999999999";
 const botToken = "discord-token";
+type FakePermissionOverwrite = {
+  id: string;
+  type: 0 | 1;
+  allow: string;
+  deny: string;
+};
 
 test("hosted Discord setup previews, applies, stores IDs, and stays idempotent", async () => {
   const consoleToken = "console-token";
@@ -65,24 +71,13 @@ test("hosted Discord setup previews, applies, stores IDs, and stays idempotent",
       true,
     );
 
-    const applied = await relayJson(
-      "/api/console/discord/setup/apply?installationId=installation-1",
-      env,
-      {
-        method: "POST",
-        headers: auth,
-        body: JSON.stringify({
-          templateId: "full-creator-community",
-          includeRoles: true,
-          applyPermissions: true,
-          postStarterMessages: true,
-        }),
-      },
-    );
+    const applied = await applyHostedSetupUntilComplete(env, auth);
 
-    assert.equal(applied.ok, true);
-    assert.equal(applied.createdRoles.length >= 13, true);
-    assert.equal(applied.starterMessagesPosted >= 8, true);
+    assert.equal(applied.result.ok, true);
+    assert.equal(applied.result.needsContinuation, false);
+    assert.equal(applied.chunks > 1, true);
+    assert.equal(fakeDiscord.roles.length >= 15, true);
+    assert.equal(fakeDiscord.messages.length >= 8, true);
     assert.equal(Boolean(db.config.operatorRoleId), true);
     assert.equal(Boolean(db.config.createdMessageIds.welcome), true);
     const messageCountAfterApply = fakeDiscord.messages.length;
@@ -124,6 +119,33 @@ const relayJson = async (path: string, env: any, init: RequestInit) => {
     );
   }
   return body;
+};
+
+const applyHostedSetupUntilComplete = async (
+  env: any,
+  headers: Record<string, string>,
+) => {
+  let result: Record<string, any> | undefined;
+  let chunks = 0;
+  do {
+    result = await relayJson(
+      "/api/console/discord/setup/apply?installationId=installation-1",
+      env,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          templateId: "full-creator-community",
+          includeRoles: true,
+          applyPermissions: true,
+          postStarterMessages: true,
+        }),
+      },
+    );
+    chunks += 1;
+  } while (result.needsContinuation === true && chunks < 10);
+  assert.ok(result, "hosted setup returned a result");
+  return { result, chunks };
 };
 
 const fakeExecutionContext = () =>
@@ -247,6 +269,7 @@ async function startFakeDiscord() {
         parent_id: null,
         topic: null,
         position: 0,
+        permission_overwrites: [] as FakePermissionOverwrite[],
       },
       {
         id: "111111111111111112",
@@ -255,6 +278,7 @@ async function startFakeDiscord() {
         parent_id: null,
         topic: null,
         position: 1,
+        permission_overwrites: [] as FakePermissionOverwrite[],
       },
     ],
     roles: [
@@ -332,6 +356,7 @@ async function startFakeDiscord() {
         parent_id: body.parent_id ?? null,
         topic: body.topic ?? null,
         position: state.channels.length,
+        permission_overwrites: body.permission_overwrites ?? [],
       };
       state.channels.push(channel);
       send(response, 200, channel);
@@ -343,7 +368,7 @@ async function startFakeDiscord() {
       /^\/api\/v10\/channels\/\d+\/permissions\/\d+$/.test(url.pathname)
     ) {
       const body = await readBody(request);
-      const overwriteId = url.pathname.split("/").at(-1);
+      const overwriteId = url.pathname.split("/").at(-1) ?? "";
       if (
         body.type === 0 &&
         !state.roles.some((role) => role.id === overwriteId)
@@ -363,6 +388,26 @@ async function startFakeDiscord() {
         state.permissionOverwrites[existingIndex] = overwrite;
       } else {
         state.permissionOverwrites.push(overwrite);
+      }
+      const channelId = url.pathname.split("/").at(-3);
+      const channel = state.channels.find((item) => item.id === channelId);
+      if (channel) {
+        const channelOverwrites = channel.permission_overwrites ?? [];
+        const channelOverwrite: FakePermissionOverwrite = {
+          id: overwriteId,
+          type: body.type === 1 ? 1 : 0,
+          allow: body.allow ?? "0",
+          deny: body.deny ?? "0",
+        };
+        const channelOverwriteIndex = channelOverwrites.findIndex(
+          (item) => item.id === overwriteId,
+        );
+        if (channelOverwriteIndex >= 0) {
+          channelOverwrites[channelOverwriteIndex] = channelOverwrite;
+        } else {
+          channelOverwrites.push(channelOverwrite);
+        }
+        channel.permission_overwrites = channelOverwrites;
       }
       send(response, 204, {});
       return;
@@ -398,6 +443,9 @@ async function startFakeDiscord() {
 
   return {
     url: `http://127.0.0.1:${address.port}`,
+    get roles() {
+      return state.roles;
+    },
     get messages() {
       return state.messages;
     },
