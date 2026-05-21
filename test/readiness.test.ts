@@ -5,7 +5,9 @@ import relayWorker, {
   outboundSendPersistence,
   processOutboundRetryQueue,
 } from "../src/index";
-import { sha256Base64Url } from "../src/crypto";
+import { bytesToHex, sha256Base64Url } from "../src/crypto";
+
+const textEncoder = new TextEncoder();
 
 test("outboundSendPersistence records retry and dead-letter metadata", () => {
   assert.deepEqual(
@@ -274,6 +276,106 @@ test("admin diagnostics are protected and redacted", async () => {
   assert.equal(JSON.stringify(body).includes("discord-token"), false);
 });
 
+test("console-authenticated Discord config stores operator role", async () => {
+  const consoleToken = "console-token";
+  const env = fakeEnv(await sha256Base64Url(consoleToken));
+  const unauthorized = await relayWorker.fetch(
+    new Request(
+      "https://relay.example/api/console/discord/config?installationId=installation-1",
+      {
+        method: "POST",
+        body: JSON.stringify({ operatorRoleId: "123456789012345678" }),
+      },
+    ),
+    env,
+    fakeExecutionContext(),
+  );
+  assert.equal(unauthorized.status, 401);
+
+  const response = await relayWorker.fetch(
+    new Request(
+      "https://relay.example/api/console/discord/config?installationId=installation-1",
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${consoleToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ operatorRoleId: "123456789012345678" }),
+      },
+    ),
+    env,
+    fakeExecutionContext(),
+  );
+  const body = (await response.json()) as Record<string, any>;
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.operatorRoleId, "123456789012345678");
+});
+
+test("stored Discord operator role allows announcement commands", async () => {
+  const signing = await discordSigningFixture();
+  const db = discordInteractionDb("123456789012345678");
+  const env = discordInteractionEnv(signing.publicKeyHex, db, undefined);
+  const commands = ["live", "late", "cancelled", "scheduled"];
+
+  for (const command of commands) {
+    const response = await relayWorker.fetch(
+      await signedDiscordInteractionRequest(signing.privateKey, command, {
+        roles: ["123456789012345678"],
+      }),
+      env,
+      fakeExecutionContext(),
+    );
+    const body = (await response.json()) as Record<string, any>;
+    assert.equal(response.status, 200);
+    assert.equal(
+      body.data.content,
+      "Announcement queued for VaexCore Console review.",
+    );
+  }
+
+  assert.equal(db.interactions.length, commands.length);
+  assert.deepEqual(
+    db.interactions.map((interaction) => interaction.commandName),
+    commands,
+  );
+  assert.deepEqual(
+    db.interactions.map((interaction) => interaction.status),
+    commands.map(() => "queued"),
+  );
+  assert.equal(
+    db.interactions.every((interaction) => interaction.allowed),
+    true,
+  );
+});
+
+test("Discord operator role env fallback still allows announcements", async () => {
+  const signing = await discordSigningFixture();
+  const db = discordInteractionDb(null);
+  const env = discordInteractionEnv(signing.publicKeyHex, db, "env-operator");
+  const response = await relayWorker.fetch(
+    await signedDiscordInteractionRequest(signing.privateKey, "live", {
+      roles: ["env-operator"],
+    }),
+    env,
+    fakeExecutionContext(),
+  );
+  const body = (await response.json()) as Record<string, any>;
+
+  assert.equal(response.status, 200);
+  assert.equal(
+    body.data.content,
+    "Announcement queued for VaexCore Console review.",
+  );
+  assert.equal(db.interactions.length, 1);
+  const interaction = db.interactions[0];
+  assert(interaction);
+  assert.equal(interaction.allowed, true);
+  assert.equal(interaction.status, "queued");
+});
+
 type FakeDbOptions = {
   grants?: "ready" | "missing" | "same-account";
 };
@@ -300,6 +402,139 @@ const fakeExecutionContext = () =>
     waitUntil() {},
     passThroughOnException() {},
   }) as any;
+
+const discordSigningFixture = async () => {
+  const keyPair = (await crypto.subtle.generateKey("Ed25519", true, [
+    "sign",
+    "verify",
+  ])) as CryptoKeyPair;
+  const publicKey = await crypto.subtle.exportKey("raw", keyPair.publicKey);
+  return {
+    privateKey: keyPair.privateKey,
+    publicKeyHex: bytesToHex(new Uint8Array(publicKey)),
+  };
+};
+
+const signedDiscordInteractionRequest = async (
+  privateKey: CryptoKey,
+  commandName: string,
+  options: { roles: string[]; permissions?: string },
+) => {
+  const timestamp = "2026-05-21T12:00:00.000Z";
+  const body = JSON.stringify({
+    id: `interaction-${commandName}`,
+    application_id: "discord-app",
+    type: 2,
+    guild_id: "discord-guild",
+    channel_id: "discord-channel",
+    data: { name: commandName, options: [] },
+    member: {
+      user: { id: "discord-user", username: "operator" },
+      roles: options.roles,
+      permissions: options.permissions ?? "0",
+    },
+  });
+  const signature = await crypto.subtle.sign(
+    "Ed25519",
+    privateKey,
+    textEncoder.encode(`${timestamp}${body}`),
+  );
+  return new Request(
+    "https://relay.example/webhooks/discord/interactions?installationId=installation-1",
+    {
+      method: "POST",
+      headers: {
+        "x-signature-ed25519": bytesToHex(new Uint8Array(signature)),
+        "x-signature-timestamp": timestamp,
+        "content-type": "application/json",
+      },
+      body,
+    },
+  );
+};
+
+const discordInteractionEnv = (
+  publicKeyHex: string,
+  db: any,
+  operatorRoleId?: string,
+) =>
+  ({
+    PUBLIC_BASE_URL: "https://relay.example",
+    TWITCH_REDIRECT_URI: "https://relay.example/oauth/twitch/callback",
+    TWITCH_CLIENT_ID: "client-id",
+    TWITCH_CLIENT_SECRET: "actual-secret-value",
+    TWITCH_EVENTSUB_SECRET: "eventsub-secret",
+    TOKEN_ENCRYPTION_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    RELAY_ADMIN_TOKEN: "admin-token",
+    DISCORD_BOT_TOKEN: "discord-token",
+    DISCORD_PUBLIC_KEY: publicKeyHex,
+    DISCORD_APPLICATION_ID: "discord-app",
+    DISCORD_GUILD_ID: "discord-guild",
+    DISCORD_OPERATOR_ROLE_ID: operatorRoleId,
+    DB: db,
+  }) as any;
+
+const discordInteractionDb = (operatorRoleId: string | null) => {
+  const state = {
+    operatorRoleId,
+    interactions: [] as Array<{
+      commandName: string;
+      status: string;
+      allowed: boolean;
+    }>,
+  };
+  return {
+    get interactions() {
+      return state.interactions;
+    },
+    prepare(sql: string) {
+      const statement = {
+        bindings: [] as unknown[],
+        bind(...values: unknown[]) {
+          this.bindings = values;
+          return this;
+        },
+        async first<T>() {
+          if (sql.includes("SELECT * FROM installations WHERE id")) {
+            return {
+              id: "installation-1",
+              name: "Console",
+              console_token_hash: "unused",
+              bot_user_id: "bot-1",
+              bot_login: "vaexcorebot",
+              broadcaster_user_id: "broadcaster-1",
+              broadcaster_login: "vaexil",
+              created_at: "2026-05-13T12:00:00.000Z",
+              updated_at: "2026-05-13T12:00:00.000Z",
+            } as T;
+          }
+          if (sql.includes("SELECT operator_role_id")) {
+            return { operator_role_id: state.operatorRoleId } as T;
+          }
+          return null as T | null;
+        },
+        async all<T>() {
+          return { results: [] as T[] };
+        },
+        async run() {
+          if (sql.includes("INSERT OR IGNORE INTO discord_interactions")) {
+            const payload = JSON.parse(String(this.bindings[4]));
+            state.interactions.push({
+              commandName: String(payload.commandName),
+              status: String(this.bindings[5]),
+              allowed: Boolean(payload.allowed),
+            });
+          }
+          return { meta: { changes: 1 } };
+        },
+      };
+      return statement;
+    },
+    async batch() {
+      return [];
+    },
+  };
+};
 
 const retryDb = () => {
   const state = {

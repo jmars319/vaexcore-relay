@@ -148,6 +148,17 @@ export default {
       }
       if (
         request.method === "POST" &&
+        url.pathname === "/api/console/discord/config"
+      ) {
+        const installation = await requireConsole(request, env, url);
+        return updateDiscordConfig(
+          await readJson(request),
+          env,
+          installation.id,
+        );
+      }
+      if (
+        request.method === "POST" &&
         url.pathname === "/api/console/discord/commands/register"
       ) {
         const installation = await requireConsole(request, env, url);
@@ -957,6 +968,7 @@ const queueDiscordInteraction = async (
   const kind = discordCommandKind(commandName);
   const user = discordInteractionUser(interaction);
   const now = new Date().toISOString();
+  const operatorRoleId = await getDiscordOperatorRoleId(env, installationId);
   const event = {
     id: interaction.id ?? crypto.randomUUID(),
     commandName,
@@ -970,10 +982,7 @@ const queueDiscordInteraction = async (
       !isDiscordAnnouncementCommand(commandName) &&
       commandName !== "setup-status"
         ? true
-        : hasDiscordOperatorPermission(
-            interaction,
-            env.DISCORD_OPERATOR_ROLE_ID,
-          ),
+        : hasDiscordOperatorPermission(interaction, operatorRoleId),
     receivedAt: now,
   };
 
@@ -1122,6 +1131,39 @@ const storeDiscordInteraction = async (
         : new Date().toISOString(),
     )
     .run();
+
+const updateDiscordConfig = async (
+  body: unknown,
+  env: RelayEnv,
+  installationId: string,
+) => {
+  const input = objectInput(body);
+  const operatorRoleId = discordSnowflakeInput(
+    input.operatorRoleId,
+    "Discord operator role ID",
+  );
+  const now = new Date().toISOString();
+  await upsertDiscordConfig(env, installationId);
+  await env.DB.prepare(
+    `
+      UPDATE discord_configs
+      SET operator_role_id = ?, updated_at = ?
+      WHERE installation_id = ?
+    `,
+  )
+    .bind(operatorRoleId, now, installationId)
+    .run();
+  await writeAudit(
+    env,
+    installationId,
+    "discord.config.update",
+    installationId,
+    {
+      operatorRoleId,
+    },
+  );
+  return json({ ok: true, operatorRoleId, updatedAt: now });
+};
 
 const registerDiscordCommands = async (
   env: RelayEnv,
@@ -1409,9 +1451,10 @@ const getDiscordReadiness = async (
   env: RelayEnv,
   installationId: string,
 ): Promise<DiscordReadiness> => {
-  const [installation, latestRegistration] = await Promise.all([
+  const [installation, latestRegistration, operatorRoleId] = await Promise.all([
     getInstallation(env, installationId),
     getLatestDiscordCommandRegistration(env, installationId),
+    getDiscordOperatorRoleId(env, installationId),
   ]);
   const interactionUrl = discordInteractionUrl(env);
   const checks = [
@@ -1449,6 +1492,13 @@ const getDiscordReadiness = async (
       detail: env.DISCORD_GUILD_ID
         ? "Guild-scoped Discord command registration is configured."
         : "Set DISCORD_GUILD_ID for the target server before live validation.",
+    },
+    {
+      key: "discord-operator-role",
+      ok: Boolean(operatorRoleId),
+      detail: operatorRoleId
+        ? "Discord operator role is configured."
+        : "Apply Console Discord setup or set DISCORD_OPERATOR_ROLE_ID.",
     },
     {
       key: "discord-interaction-url",
@@ -2375,6 +2425,23 @@ const getLatestDiscordCommandRegistration = (
     .bind(installationId)
     .first<DiscordCommandRegistrationRow>();
 
+const getDiscordOperatorRoleId = async (
+  env: RelayEnv,
+  installationId: string,
+) => {
+  const row = await env.DB.prepare(
+    `
+      SELECT operator_role_id
+      FROM discord_configs
+      WHERE installation_id = ?
+      LIMIT 1
+    `,
+  )
+    .bind(installationId)
+    .first<{ operator_role_id: string | null }>();
+  return row?.operator_role_id || env.DISCORD_OPERATOR_ROLE_ID;
+};
+
 const getOutboundSendByIdempotencyKey = (
   env: RelayEnv,
   installationId: string,
@@ -2403,7 +2470,10 @@ const upsertDiscordConfig = async (env: RelayEnv, installationId: string) => {
       ON CONFLICT(installation_id) DO UPDATE SET
         application_id = excluded.application_id,
         guild_id = excluded.guild_id,
-        operator_role_id = excluded.operator_role_id,
+        operator_role_id = COALESCE(
+          discord_configs.operator_role_id,
+          excluded.operator_role_id
+        ),
         interaction_url = excluded.interaction_url,
         updated_at = excluded.updated_at
     `,
@@ -2516,6 +2586,14 @@ const stringInput = (value: unknown, field: string, maxLength: number) => {
     throw new HttpError(400, `${field} is too long.`);
   }
   return trimmed;
+};
+
+const discordSnowflakeInput = (value: unknown, field: string) => {
+  const snowflake = stringInput(value, field, 32);
+  if (!/^\d{5,32}$/.test(snowflake)) {
+    throw new HttpError(400, `${field} must be a Discord ID.`);
+  }
+  return snowflake;
 };
 
 const optionalBoundedString = (
