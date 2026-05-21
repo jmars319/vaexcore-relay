@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { bytesToHex } from "../src/crypto";
 import {
+  buildDiscordInstallAuthorizeUrl,
   discordApplicationCommands,
+  discordHostedInstallPermissions,
   discordInteractionMatchesConfiguredGuild,
   discordOptionRecord,
   hasDiscordOperatorPermission,
@@ -76,6 +78,29 @@ test("registerDiscordApplicationCommands bulk overwrites guild commands", async 
     "https://discord.com/api/v10/applications/app/guilds/guild/commands",
   );
   assert.ok(Array.isArray(requestBody));
+});
+
+test("hosted Discord install URL avoids Administrator and Manage Server", () => {
+  const permissions = BigInt(discordHostedInstallPermissions());
+  const administrator = 1n << 3n;
+  const manageServer = 1n << 5n;
+  const url = new URL(
+    buildDiscordInstallAuthorizeUrl({
+      applicationId: "app-id",
+      redirectUri: "https://relay.example/oauth/discord/callback",
+      state: "state-token",
+    }),
+  );
+
+  assert.equal((permissions & administrator) === 0n, true);
+  assert.equal((permissions & manageServer) === 0n, true);
+  assert.equal(url.hostname, "discord.com");
+  assert.equal(url.searchParams.get("response_type"), "code");
+  assert.equal(
+    url.searchParams.get("scope"),
+    "bot applications.commands identify",
+  );
+  assert.equal(url.searchParams.get("state"), "state-token");
 });
 
 test("discord option and operator helpers keep public commands guarded", () => {

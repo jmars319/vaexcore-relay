@@ -178,7 +178,7 @@ test("console readiness report is redacted and includes queue counts", async () 
   assert.equal(body.counts.outboundSends.deadLettered, 1);
   assert.equal(body.schema.ready, true);
   assert.equal(body.schema.presentTables, body.schema.requiredTables);
-  assert.equal(body.schema.migrations.appliedCount, 3);
+  assert.equal(body.schema.migrations.appliedCount, 4);
   assert.equal(body.queues.twitchChatEvents.queued, 2);
   assert.equal(
     body.queues.twitchChatEvents.oldestReceivedAt,
@@ -314,6 +314,128 @@ test("console-authenticated Discord config stores operator role", async () => {
   assert.equal(body.operatorRoleId, "123456789012345678");
 });
 
+test("Discord install start requires Console auth and returns an authorize URL", async () => {
+  const consoleToken = "console-token";
+  const env = fakeEnv(await sha256Base64Url(consoleToken));
+  const unauthorized = await relayWorker.fetch(
+    new Request(
+      "https://relay.example/api/console/discord/install/start?installationId=installation-1",
+      { method: "POST", body: "{}" },
+    ),
+    env,
+    fakeExecutionContext(),
+  );
+  assert.equal(unauthorized.status, 401);
+
+  const response = await relayWorker.fetch(
+    new Request(
+      "https://relay.example/api/console/discord/install/start?installationId=installation-1",
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${consoleToken}`,
+          "content-type": "application/json",
+        },
+        body: "{}",
+      },
+    ),
+    env,
+    fakeExecutionContext(),
+  );
+  const body = (await response.json()) as Record<string, any>;
+  const authorizeUrl = new URL(body.authorizeUrl);
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(authorizeUrl.hostname, "discord.com");
+  assert.equal(
+    authorizeUrl.searchParams.get("scope"),
+    "bot applications.commands identify",
+  );
+  assert.equal(
+    authorizeUrl.searchParams.get("redirect_uri"),
+    "https://relay.example/oauth/discord/callback",
+  );
+});
+
+test("Discord callback stores selected guild without persisting OAuth tokens", async () => {
+  const db = discordInstallCallbackDb();
+  const originalFetch = globalThis.fetch;
+  const fetched: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    fetched.push(String(input));
+    if (String(input).includes("/oauth2/token")) {
+      return Response.json({
+        access_token: "discord-access-token",
+        refresh_token: "discord-refresh-token",
+        token_type: "Bearer",
+        expires_in: 604800,
+        scope: "bot applications.commands identify",
+        guild: {
+          id: "123456789012345678",
+          name: "VaexCore Test Server",
+        },
+      });
+    }
+    if (String(input).includes("/oauth2/token/revoke")) {
+      return Response.json({ ok: true });
+    }
+    return Response.json({ ok: false }, { status: 404 });
+  }) as typeof fetch;
+
+  try {
+    const response = await relayWorker.fetch(
+      new Request(
+        "https://relay.example/oauth/discord/callback?code=discord-code&state=state-1",
+      ),
+      discordInstallEnv(db),
+      fakeExecutionContext(),
+    );
+    const body = await response.text();
+
+    assert.equal(response.status, 200);
+    assert.match(body, /Discord authorization saved/);
+    assert.equal(db.config?.guildId, "123456789012345678");
+    assert.equal(db.config?.guildName, "VaexCore Test Server");
+    assert.equal(db.deletedState, "state-1");
+    assert.equal(
+      JSON.stringify(db.config).includes("discord-access-token"),
+      false,
+    );
+    assert.equal(
+      fetched.some((url) => url.includes("/oauth2/token/revoke")),
+      true,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Discord readiness accepts stored guild without DISCORD_GUILD_ID", async () => {
+  const consoleToken = "console-token";
+  const env = fakeEnv(await sha256Base64Url(consoleToken), {
+    discordGuildEnv: null,
+    storedDiscordGuild: true,
+  });
+  const response = await relayWorker.fetch(
+    new Request(
+      "https://relay.example/api/console/discord/status?installationId=installation-1",
+      { headers: { authorization: `Bearer ${consoleToken}` } },
+    ),
+    env,
+    fakeExecutionContext(),
+  );
+  const body = (await response.json()) as Record<string, any>;
+  const guildCheck = body.readiness.checks.find(
+    (check: { key: string }) => check.key === "discord-guild-id",
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(body.config.guildId, "stored-discord-guild");
+  assert.equal(guildCheck.ok, true);
+  assert.match(guildCheck.detail, /Discord is connected/);
+});
+
 test("stored Discord operator role allows announcement commands", async () => {
   const signing = await discordSigningFixture();
   const db = discordInteractionDb("123456789012345678");
@@ -378,6 +500,8 @@ test("Discord operator role env fallback still allows announcements", async () =
 
 type FakeDbOptions = {
   grants?: "ready" | "missing" | "same-account";
+  discordGuildEnv?: string | null;
+  storedDiscordGuild?: boolean;
 };
 
 const fakeEnv = (consoleTokenHash: string, options: FakeDbOptions = {}) =>
@@ -392,7 +516,10 @@ const fakeEnv = (consoleTokenHash: string, options: FakeDbOptions = {}) =>
     DISCORD_BOT_TOKEN: "discord-token",
     DISCORD_PUBLIC_KEY: "public-key",
     DISCORD_APPLICATION_ID: "discord-app",
-    DISCORD_GUILD_ID: "discord-guild",
+    DISCORD_CLIENT_SECRET: "discord-client-secret",
+    ...(options.discordGuildEnv === null
+      ? {}
+      : { DISCORD_GUILD_ID: options.discordGuildEnv ?? "discord-guild" }),
     DISCORD_OPERATOR_ROLE_ID: "operator-role",
     DB: fakeDb(consoleTokenHash, options),
   }) as any;
@@ -469,10 +596,80 @@ const discordInteractionEnv = (
     DISCORD_BOT_TOKEN: "discord-token",
     DISCORD_PUBLIC_KEY: publicKeyHex,
     DISCORD_APPLICATION_ID: "discord-app",
+    DISCORD_CLIENT_SECRET: "discord-client-secret",
     DISCORD_GUILD_ID: "discord-guild",
     DISCORD_OPERATOR_ROLE_ID: operatorRoleId,
     DB: db,
   }) as any;
+
+const discordInstallEnv = (db: any) =>
+  ({
+    PUBLIC_BASE_URL: "https://relay.example",
+    TWITCH_REDIRECT_URI: "https://relay.example/oauth/twitch/callback",
+    TWITCH_CLIENT_ID: "client-id",
+    TWITCH_CLIENT_SECRET: "actual-secret-value",
+    TWITCH_EVENTSUB_SECRET: "eventsub-secret",
+    TOKEN_ENCRYPTION_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    RELAY_ADMIN_TOKEN: "admin-token",
+    DISCORD_BOT_TOKEN: "discord-token",
+    DISCORD_PUBLIC_KEY: "public-key",
+    DISCORD_APPLICATION_ID: "discord-app",
+    DISCORD_CLIENT_SECRET: "discord-client-secret",
+    DB: db,
+  }) as any;
+
+const discordInstallCallbackDb = () => {
+  const state = {
+    config: null as null | { guildId: string; guildName: string | null },
+    deletedState: "",
+  };
+  return {
+    get config() {
+      return state.config;
+    },
+    get deletedState() {
+      return state.deletedState;
+    },
+    prepare(sql: string) {
+      const statement = {
+        bindings: [] as unknown[],
+        bind(...values: unknown[]) {
+          this.bindings = values;
+          return this;
+        },
+        async first<T>() {
+          if (sql.includes("FROM discord_install_states")) {
+            return {
+              installation_id: "installation-1",
+              return_url: null,
+              expires_at: "2999-01-01T00:00:00.000Z",
+            } as T;
+          }
+          return null as T | null;
+        },
+        async all<T>() {
+          return { results: [] as T[] };
+        },
+        async run() {
+          if (sql.includes("INSERT INTO discord_configs")) {
+            state.config = {
+              guildId: String(this.bindings[3]),
+              guildName: this.bindings[4] as string | null,
+            };
+          }
+          if (sql.includes("DELETE FROM discord_install_states")) {
+            state.deletedState = String(this.bindings[0]);
+          }
+          return { meta: { changes: 1 } };
+        },
+      };
+      return statement;
+    },
+    async batch() {
+      return [];
+    },
+  };
+};
 
 const discordInteractionDb = (operatorRoleId: string | null) => {
   const state = {
@@ -698,12 +895,38 @@ const firstForSql = (
       created_at: "2026-05-13T12:02:00.000Z",
     };
   }
+  if (
+    sql.includes("FROM discord_configs") &&
+    sql.includes("WHERE installation_id = ?")
+  ) {
+    if (!options.storedDiscordGuild) return null;
+    return {
+      installation_id: "installation-1",
+      application_id: "discord-app",
+      guild_id: "stored-discord-guild",
+      guild_name: "Stored Discord Server",
+      operator_role_id: "operator-role",
+      interaction_url: "https://relay.example/webhooks/discord/interactions",
+      installed_at: "2026-05-13T12:01:00.000Z",
+      setup_template_id: "full-creator-community",
+      setup_applied_at: null,
+      starter_messages_applied_at: null,
+      stream_announcement_channel_id: null,
+      general_announcement_channel_id: null,
+      suggestion_channel_id: null,
+      stream_alerts_role_id: null,
+      created_channel_ids_json: "{}",
+      created_role_ids_json: "{}",
+      created_message_ids_json: "{}",
+      updated_at: "2026-05-13T12:01:00.000Z",
+    };
+  }
   if (sql.includes("COUNT(*) AS count FROM d1_migrations")) {
-    return { count: 3 };
+    return { count: 4 };
   }
   if (sql.includes("FROM d1_migrations")) {
     return {
-      name: "0003_bot_readiness.sql",
+      name: "0004_discord_hosted_install.sql",
       applied_at: "2026-05-13T12:04:00.000Z",
     };
   }
@@ -780,6 +1003,7 @@ const allForSql = (sql: string) => {
       "outbound_chat_sends",
       "audit_events",
       "discord_configs",
+      "discord_install_states",
       "discord_interactions",
       "discord_suggestions",
       "discord_command_registrations",

@@ -1,6 +1,7 @@
 import { hexToBytes } from "./crypto";
 
 const discordApiBase = "https://discord.com/api/v10";
+const discordAuthorizeBase = "https://discord.com/oauth2/authorize";
 const textEncoder = new TextEncoder();
 
 export const discordInteractionType = {
@@ -27,8 +28,24 @@ const discordOptionType = {
 
 const discordPermission = {
   administrator: 1n << 3n,
+  manageChannels: 1n << 4n,
   manageGuild: 1n << 5n,
+  addReactions: 1n << 6n,
+  viewChannel: 1n << 10n,
+  sendMessages: 1n << 11n,
+  embedLinks: 1n << 14n,
+  readMessageHistory: 1n << 16n,
+  manageRoles: 1n << 28n,
 } as const;
+
+const discordHostedInstallPermissionBits =
+  discordPermission.viewChannel |
+  discordPermission.manageChannels |
+  discordPermission.manageRoles |
+  discordPermission.sendMessages |
+  discordPermission.embedLinks |
+  discordPermission.readMessageHistory |
+  discordPermission.addReactions;
 
 export type DiscordInteractionOption = {
   name?: string;
@@ -72,6 +89,87 @@ export type DiscordApplicationCommand = {
     description: string;
     required?: boolean;
   }>;
+};
+
+export type DiscordOAuthTokenResponse = {
+  access_token?: string;
+  refresh_token?: string;
+  token_type?: string;
+  expires_in?: number;
+  scope?: string;
+  guild?: {
+    id?: string;
+    name?: string;
+  };
+};
+
+export const discordHostedInstallPermissions = () =>
+  discordHostedInstallPermissionBits.toString();
+
+export const buildDiscordInstallAuthorizeUrl = (input: {
+  applicationId: string;
+  redirectUri: string;
+  state: string;
+}) => {
+  const url = new URL(discordAuthorizeBase);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("client_id", input.applicationId);
+  url.searchParams.set("scope", "bot applications.commands identify");
+  url.searchParams.set("permissions", discordHostedInstallPermissions());
+  url.searchParams.set("redirect_uri", input.redirectUri);
+  url.searchParams.set("state", input.state);
+  url.searchParams.set("integration_type", "0");
+  return url.toString();
+};
+
+export const exchangeDiscordOAuthCode = async (input: {
+  applicationId: string;
+  clientSecret: string;
+  redirectUri: string;
+  code: string;
+  fetchImpl?: typeof fetch;
+}) => {
+  const body = new URLSearchParams({
+    client_id: input.applicationId,
+    client_secret: input.clientSecret,
+    grant_type: "authorization_code",
+    code: input.code,
+    redirect_uri: input.redirectUri,
+  });
+  const response = await (input.fetchImpl ?? fetch)(
+    `${discordApiBase}/oauth2/token`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body,
+    },
+  );
+  const token = (await response
+    .json()
+    .catch(() => null)) as DiscordOAuthTokenResponse | null;
+  return { response, token };
+};
+
+export const revokeDiscordOAuthToken = async (input: {
+  applicationId: string;
+  clientSecret: string;
+  token: string;
+  fetchImpl?: typeof fetch;
+}) => {
+  const body = new URLSearchParams({
+    client_id: input.applicationId,
+    client_secret: input.clientSecret,
+    token: input.token,
+  });
+  return (input.fetchImpl ?? fetch)(`${discordApiBase}/oauth2/token/revoke`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body,
+  });
 };
 
 export type DiscordQueuedEvent = {

@@ -85,6 +85,7 @@ RELAY_ADMIN_TOKEN
 DISCORD_BOT_TOKEN
 DISCORD_PUBLIC_KEY
 DISCORD_APPLICATION_ID
+DISCORD_CLIENT_SECRET
 ```
 
 `TOKEN_ENCRYPTION_KEY` must be a base64-encoded 32-byte key. Generate one with:
@@ -111,6 +112,14 @@ https://<relay-worker-host>/webhooks/discord/interactions
 ```
 
 This endpoint must be configured in the Discord application Interactions Endpoint URL. Relay verifies `X-Signature-Ed25519` and `X-Signature-Timestamp`, responds to Discord `PING`, and queues command events for Console pickup.
+
+Discord OAuth redirect URI:
+
+```text
+https://<relay-worker-host>/oauth/discord/callback
+```
+
+Add this redirect URI in the Discord Developer Portal before using Console's hosted `Connect Discord` button. Hosted installs store the selected guild in D1, so `DISCORD_GUILD_ID` is only a manual fallback for development or one-off testing.
 
 ## Working Locally
 
