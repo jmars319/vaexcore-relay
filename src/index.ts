@@ -126,6 +126,12 @@ export default {
         await requireAdmin(request, env);
         return pairConsole(await readJson(request), env);
       }
+      if (
+        request.method === "POST" &&
+        url.pathname === "/api/console/install/start"
+      ) {
+        return startConsoleInstall(await readJson(request), env);
+      }
       if (request.method === "GET" && url.pathname === "/api/console/status") {
         const installation = await requireConsole(request, env, url);
         const [readiness, schema, queues, freshness, latest] =
@@ -330,7 +336,20 @@ export default {
 const pairConsole = async (body: unknown, env: RelayEnv) => {
   const input = objectInput(body);
   const name =
-    stringInput(input.name, "Installation name", 80) || "VaexCore Console";
+    optionalBoundedString(input.name, "Installation name", 80) ||
+    "VaexCore Console";
+  return createConsoleInstallation(env, name);
+};
+
+const startConsoleInstall = async (body: unknown, env: RelayEnv) => {
+  const input = objectInput(body);
+  const name =
+    optionalBoundedString(input.name, "Installation name", 80) ||
+    "VaexCore Console";
+  return createConsoleInstallation(env, name);
+};
+
+const createConsoleInstallation = async (env: RelayEnv, name: string) => {
   const id = crypto.randomUUID();
   const consoleToken = randomToken(32);
   const now = new Date().toISOString();
@@ -349,8 +368,11 @@ const pairConsole = async (body: unknown, env: RelayEnv) => {
     installationId: id,
     consoleToken,
     next: {
+      twitchCallbackUrl: `${env.PUBLIC_BASE_URL}/oauth/twitch/callback`,
       botOAuthUrl: `${env.PUBLIC_BASE_URL}/oauth/twitch/start?installationId=${id}&kind=bot`,
       broadcasterOAuthUrl: `${env.PUBLIC_BASE_URL}/oauth/twitch/start?installationId=${id}&kind=broadcaster`,
+      twitchEventSubWebhookUrl: `${env.PUBLIC_BASE_URL}/webhooks/twitch/eventsub`,
+      discordInteractionUrl: `${env.PUBLIC_BASE_URL}/webhooks/discord/interactions`,
     },
   });
 };

@@ -57,7 +57,7 @@ wrangler.jsonc    Cloudflare Worker, D1 binding, vars, and observability config
 - Twitch bot and broadcaster OAuth flows are implemented.
 - EventSub webhook challenge and signature validation are implemented.
 - Discord interaction signature validation, slash command registration, and suggestion queue APIs are implemented.
-- Console-facing status, pairing, event pickup, subscription registration, and chat send endpoints are implemented.
+- Console-facing hosted install, status, event pickup, subscription registration, and chat send endpoints are implemented.
 - Worker dry-run, typecheck, lint, and unit tests are available.
 
 ## Deployment Posture
@@ -95,6 +95,8 @@ node -e "console.log(Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toS
 ```
 
 Development uses the placeholder D1 database id in `wrangler.jsonc`. Create the real D1 database before deployment and replace the binding id.
+
+Console starts hosted Twitch setup with `POST /api/console/install/start`. This creates a Console installation and returns only that installation's local pairing token plus bot/broadcaster OAuth URLs. Normal users do not need the Relay admin token, Twitch client secret, or Worker secrets.
 
 Optional Discord vars/secrets:
 

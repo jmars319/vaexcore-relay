@@ -276,6 +276,44 @@ test("admin diagnostics are protected and redacted", async () => {
   assert.equal(JSON.stringify(body).includes("discord-token"), false);
 });
 
+test("hosted install start creates a Console pairing without admin auth", async () => {
+  const env = fakeEnv("unused-token-hash");
+  const response = await relayWorker.fetch(
+    new Request("https://relay.example/api/console/install/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    }),
+    env,
+    fakeExecutionContext(),
+  );
+  const body = (await response.json()) as Record<string, any>;
+
+  assert.equal(response.status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(typeof body.installationId, "string");
+  assert.equal(typeof body.consoleToken, "string");
+  assert.match(body.next.botOAuthUrl, /\/oauth\/twitch\/start/);
+  assert.equal(
+    new URL(body.next.botOAuthUrl).searchParams.get("installationId"),
+    body.installationId,
+  );
+  assert.equal(
+    body.next.twitchCallbackUrl,
+    "https://relay.example/oauth/twitch/callback",
+  );
+  assert.equal(
+    body.next.twitchEventSubWebhookUrl,
+    "https://relay.example/webhooks/twitch/eventsub",
+  );
+  assert.equal(
+    body.next.discordInteractionUrl,
+    "https://relay.example/webhooks/discord/interactions",
+  );
+  assert.equal(JSON.stringify(body).includes("actual-secret-value"), false);
+  assert.equal(JSON.stringify(body).includes("admin-token"), false);
+});
+
 test("console-authenticated Discord config stores operator role", async () => {
   const consoleToken = "console-token";
   const env = fakeEnv(await sha256Base64Url(consoleToken));
