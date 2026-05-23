@@ -24,16 +24,16 @@ import {
   revokeDiscordOAuthToken,
   verifyDiscordInteractionSignature,
 } from "./discord";
-import { SafeInputError } from "../../console/desktop/shared/src/core/security";
-import { DiscordApiClient } from "../../console/desktop/shared/src/discord/client";
+import { SafeInputError } from "./console-shared/core/security";
+import { DiscordApiClient } from "./console-shared/discord/client";
 import {
   applyDiscordServerSetup,
   planDiscordServerSetup,
-} from "../../console/desktop/shared/src/discord/setup";
+} from "./console-shared/discord/setup";
 import {
   discordSetupTemplates,
   getDiscordSetupTemplate,
-} from "../../console/desktop/shared/src/discord/templates";
+} from "./console-shared/discord/templates";
 import {
   accessTokenFromGrant,
   buildTwitchAuthorizeUrl,
