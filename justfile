@@ -13,7 +13,7 @@ actions:
     actionlint
 
 security-audit:
-    osv-scanner scan source --recursive --allow-no-lockfiles --experimental-exclude node_modules --experimental-exclude .next --experimental-exclude dist --experimental-exclude build --experimental-exclude target --experimental-exclude archive .
+    osv-scanner scan source --allow-no-lockfiles --lockfile 'package-lock.json'
 
 security:
     just actions
