@@ -285,7 +285,7 @@ export default {
         request.method === "GET" &&
         url.pathname === "/oauth/twitch/callback"
       ) {
-        return finishOAuth(url, env);
+        return finishOAuth(url, env, ctx);
       }
       if (
         request.method === "GET" &&
@@ -411,7 +411,7 @@ const startOAuth = async (url: URL, env: RelayEnv) => {
   );
 };
 
-const finishOAuth = async (url: URL, env: RelayEnv) => {
+const finishOAuth = async (url: URL, env: RelayEnv, ctx: ExecutionContext) => {
   const code = stringInput(url.searchParams.get("code"), "OAuth code", 400);
   const state = stringInput(url.searchParams.get("state"), "OAuth state", 120);
   const stateRow = await env.DB.prepare(
@@ -508,9 +508,82 @@ const finishOAuth = async (url: URL, env: RelayEnv) => {
       scopes: validation.scopes,
     },
   );
-  return html(
-    "Twitch authorization saved. You can close this tab and return to vaexcore console.",
+  const eventSub = await maybeRegisterEventSubAfterOAuth(
+    env,
+    stateRow.installation_id,
+    ctx,
   );
+  const eventSubMessage =
+    eventSub.status === "registered"
+      ? " EventSub was registered automatically."
+      : eventSub.status === "already-registered"
+        ? " EventSub was already registered."
+        : eventSub.status === "pending"
+          ? " Finish the other Twitch authorization in Console to enable automatic EventSub registration."
+          : ` EventSub still needs attention: ${eventSub.message}`;
+  return html(
+    `Twitch authorization saved.${eventSubMessage} You can close this tab and return to vaexcore console.`,
+  );
+};
+
+const maybeRegisterEventSubAfterOAuth = async (
+  env: RelayEnv,
+  installationId: string,
+  ctx: ExecutionContext,
+): Promise<
+  | { status: "registered" }
+  | { status: "already-registered" }
+  | { status: "pending" }
+  | { status: "failed"; message: string }
+> => {
+  if (await hasCreatedEventSubRegistration(env, installationId)) {
+    return { status: "already-registered" };
+  }
+
+  try {
+    await requireRelayReadyGrants(env, installationId);
+  } catch (error) {
+    if (error instanceof HttpError && error.status === 409) {
+      if (error.message.includes("separate")) {
+        return { status: "failed", message: error.message };
+      }
+      return { status: "pending" };
+    }
+    return {
+      status: "failed",
+      message: error instanceof Error ? error.message : "unknown error",
+    };
+  }
+
+  try {
+    await registerEventSub(env, installationId, ctx);
+    return { status: "registered" };
+  } catch (error) {
+    return {
+      status: "failed",
+      message: error instanceof Error ? error.message : "unknown error",
+    };
+  }
+};
+
+const hasCreatedEventSubRegistration = async (
+  env: RelayEnv,
+  installationId: string,
+) => {
+  const existing = await env.DB.prepare(
+    `
+      SELECT id
+      FROM eventsub_subscriptions
+      WHERE installation_id = ?
+        AND type = 'channel.chat.message'
+        AND status = 'created'
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `,
+  )
+    .bind(installationId)
+    .first<{ id: string }>();
+  return Boolean(existing);
 };
 
 type DiscordConfigRow = {
