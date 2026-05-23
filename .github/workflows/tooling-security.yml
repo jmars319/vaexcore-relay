@@ -1,0 +1,25 @@
+name: Tooling Security
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  just-security:
+    name: just security
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install local tooling
+        run: brew install just actionlint osv-scanner
+
+      - name: Run local security gate
+        run: just security
