@@ -1,0 +1,52 @@
+{
+  "label": "vaexcore-relay",
+  "maxImplementationFileLines": 700,
+  "nearBudgetMarginLines": 25,
+  "maxStyleFileLines": 1200,
+  "maxAppShellLines": 180,
+  "maxDesktopMainLines": 500,
+  "maxDomainBarrelLines": 250,
+  "initialBundleBudgetKb": 175,
+  "ignoredSegments": [],
+  "ignoredPathIncludes": ["src/generated"],
+  "sourceRoots": ["src", "test", "scripts"],
+  "specificFileBudgets": {
+    "src/index.ts": 80,
+    "src/routes/router.ts": 300,
+    "src/console-shared/discord/templates.ts": 120,
+    "src/console-shared/discord/setup.ts": 80,
+    "scripts/audit-maintainability.mjs": 360,
+    "scripts/analyze-build.mjs": 160
+  },
+  "routeContract": {
+    "routerFile": "src/routes/router.ts",
+    "snapshotFile": "scripts/contracts/relay-routes.json"
+  },
+  "startupImportRules": [
+    {
+      "file": "src/index.ts",
+      "banned": [
+        "console-shared/",
+        "./discord",
+        "./twitch",
+        "./readiness",
+        "./diagnostics",
+        "./routes/discord",
+        "./routes/twitchOAuth",
+        "./routes/eventSub"
+      ]
+    }
+  ],
+  "allowedGenerated": [
+    "src/vite-env.d.ts",
+    "src/atlasDesktop.d.ts",
+    "src/marketDeskDesktop.d.ts",
+    "apps/webapp/next-env.d.ts",
+    "apps/desktopapp/src/vite-env.d.ts",
+    "apps/webapp/src/vite-env.d.ts",
+    "apps/desktop/src/vite-env.d.ts",
+    "src/generated/worker-configuration.d.ts"
+  ],
+  "allowGeneratedArtifacts": false,
+  "assetDirs": ["dist/dry-run"]
+}

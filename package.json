@@ -9,11 +9,14 @@
     "deploy": "wrangler deploy",
     "lint": "prettier --check .",
     "format": "prettier --write .",
-    "types:worker": "wrangler types src/worker-configuration.d.ts",
+    "types:worker": "mkdir -p src/generated && wrangler types src/generated/worker-configuration.d.ts",
     "typecheck": "npm run types:worker && tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
     "worker:check": "wrangler deploy --dry-run --outdir dist/dry-run",
-    "ci": "npm run lint && npm run typecheck && npm test && npm run worker:check"
+    "ci": "npm run lint && npm run typecheck && npm test && npm run worker:check && npm run audit:maintainability && npm run budget:bundle",
+    "analyze:bundle": "node scripts/analyze-build.mjs",
+    "budget:bundle": "node scripts/analyze-build.mjs --strict",
+    "audit:maintainability": "node scripts/audit-maintainability.mjs --strict"
   },
   "engines": {
     "node": ">=22.0.0"

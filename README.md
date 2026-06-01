@@ -39,11 +39,15 @@ Relay is not a desktop app, packaging target, public dashboard, or generic SaaS 
 
 ```text
 src/
-  index.ts        Worker routes, OAuth callbacks, Console API, EventSub webhook
+  index.ts        Worker entrypoint and compatibility exports
+  routes/         route registry plus Console, OAuth, webhook, chat, and Discord route groups
+  repositories.ts D1 row access, auth guards, safe summaries, and audit writes
+  readiness*.ts   readiness, queue, freshness, and report assembly helpers
   discord.ts      Discord interaction signature, slash command, and queue helpers
   twitch.ts       Twitch OAuth, EventSub, Send Chat Message, and normalization helpers
   crypto.ts       token encryption, hashing, HMAC, and secure random helpers
   types.ts        Worker request, grant, readiness, and event contracts
+  generated/      ignored Wrangler Worker environment types
 
 migrations/       D1 schema for installations, grants, subscriptions, queues, and audit
 test/             Node test coverage for crypto, signatures, scopes, and event mapping
