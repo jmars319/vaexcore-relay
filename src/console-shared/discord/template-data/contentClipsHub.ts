@@ -153,7 +153,8 @@ export const contentClipsHubDiscordTemplate: DiscordSetupTemplate = {
       name: "staff-chat",
       kind: "text",
       parentId: "category-staff",
-      topic: "Private staff coordination placeholder.",
+      topic:
+        "Private staff coordination for stream-day notes, moderation handoffs, event prep, and Console action review.",
     },
     {
       id: "mod-log",

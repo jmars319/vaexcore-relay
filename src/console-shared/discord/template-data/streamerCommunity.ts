@@ -125,7 +125,7 @@ export const streamerCommunityDiscordTemplate: DiscordSetupTemplate = {
       kind: "text",
       parentId: "category-staff",
       topic:
-        "Private staff coordination placeholder. Review Discord permissions after setup.",
+        "Private staff coordination for stream-day notes, moderation handoffs, event prep, and Console action review. Review Discord permissions after setup.",
     },
     {
       id: "mod-log",
