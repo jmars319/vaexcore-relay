@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Cloudflare Worker relay for VaexCore Twitch chatbot identity, EventSub webhooks, app-token chat sends, and Discord interactions.",
+  "description": "Vaexcore Relay by Tenra is a Cloudflare Worker relay for Twitch chatbot identity, EventSub webhooks, app-token chat sends, and Discord interactions.",
   "scripts": {
     "dev": "wrangler dev --local",
     "deploy": "wrangler deploy",
